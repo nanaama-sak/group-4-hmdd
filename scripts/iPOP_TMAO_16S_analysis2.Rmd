@@ -1,0 +1,3052 @@
+---
+title: "iPOP Gut Microbiome, TMAO, and Insulin Resistance Analysis"
+author: "Devendra Paudel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+editor_options:
+  chunk_output_type: console
+---
+
+# Analysis objective
+
+The objective of this analysis is to examine associations of gut microbial
+composition and circulating trimethylamine N-oxide (TMAO) with insulin
+resistance status in the iPOP cohort.
+
+The microbiome and TMAO datasets are analyzed separately to maximize the
+available sample size.
+
+For the microbiome analysis, Visit 01 is used as the first available
+microbiome visit. Participants classified as insulin resistant (IR) or
+insulin sensitive (IS) are included.
+
+For the TMAO analysis, E11 is used as the first available metabolomics
+visit. Participants classified as IR or IS are included.
+
+Microbiome analyses include:
+
+1. Alpha diversity and IR/IS status.
+2. Beta diversity and IR/IS status.
+3. Genus-level associations with IR/IS status using logistic regression.
+
+TMAO is analyzed separately for its association with IR/IS status using
+logistic regression.
+
+Age, sex, and BMI are included as covariates in adjusted models.
+
+For genus-specific analyses, genera are prevalence-filtered, zeros are
+replaced with a small pseudocount, relative abundances are CLR-transformed,
+and CLR values are standardized before logistic regression.
+
+Relative abundance data are retained without CLR transformation for
+alpha- and beta-diversity analyses.
+
+---
+
+# 1. Load required libraries
+
+```{r libraries}
+
+# Clear workspace
+rm(list = ls())
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(phyloseq)
+library(vegan)
+library(tibble)
+
+# Main project directory
+project_dir <- "/Users/paude/Documents/HMDD_project"
+
+# Output directory
+output_dir <- file.path(
+  project_dir,
+  "output"
+)
+
+# Figure directory
+figures_dir <- file.path(
+  output_dir,
+  "figures"
+)
+
+# Create figure directory if it does not already exist
+dir.create(
+  figures_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+# Prevalence threshold for genus-specific analyses
+prev_cut <- 0.20
+```
+
+---
+
+# 2. Load first-visit microbiome data
+
+## 2.1 Load Visit 01 metadata
+
+```{r load_microbiome_metadata}
+
+micro_meta <- read_csv(
+  file.path(
+    output_dir,
+    "iPOP_16S_visit01_metadata.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# Inspect
+dim(micro_meta)
+
+head(micro_meta)
+
+names(micro_meta)
+```
+
+---
+
+## 2.2 Load Visit 01 genus-level phyloseq object
+
+```{r load_microbiome_phyloseq}
+
+ps_16s <- readRDS(
+  file.path(
+    output_dir,
+    "iPOP_16S_visit01_genus_relative_abundance.rds"
+  )
+)
+
+# Inspect
+ps_16s
+
+nsamples(ps_16s)
+
+ntaxa(ps_16s)
+
+# Relative abundance should sum to 1
+summary(
+  sample_sums(ps_16s)
+)
+
+all(
+  abs(
+    sample_sums(ps_16s) - 1
+  ) < 1e-9
+)
+```
+
+---
+
+# 3. Prepare microbiome analysis population
+
+Participants classified as IR or IS are retained.
+
+Complete-case restrictions for age, sex, and BMI are applied separately
+for adjusted analyses.
+
+IR is coded as 1 and IS as 0.
+
+```{r prepare_microbiome_population}
+
+# Check IR/IS classification before exclusions
+micro_meta %>%
+  count(
+    ir_is_classification
+  )
+
+# Keep participants with known IR/IS classification
+micro_iris <- micro_meta %>%
+
+  filter(
+    ir_is_classification %in%
+      c("IR", "IS")
+  ) %>%
+
+  mutate(
+
+    # IR = 1, IS = 0
+    IR_binary = if_else(
+      ir_is_classification == "IR",
+      1,
+      0
+    ),
+
+    # IS reference category
+    ir_is_classification = factor(
+      ir_is_classification,
+      levels = c(
+        "IS",
+        "IR"
+      )
+    ),
+
+    sex = factor(
+      sex
+    )
+  )
+
+# Sample size
+micro_iris %>%
+  summarise(
+
+    n_samples =
+      n(),
+
+    n_subjects =
+      n_distinct(
+        SubjectID
+      ),
+
+    n_IR =
+      sum(
+        IR_binary == 1
+      ),
+
+    n_IS =
+      sum(
+        IR_binary == 0
+      )
+  )
+
+# IR/IS distribution
+micro_iris %>%
+  count(
+    ir_is_classification
+  )
+
+# Check covariate missingness
+micro_iris %>%
+  summarise(
+
+    n_total =
+      n(),
+
+    missing_age =
+      sum(
+        is.na(age)
+      ),
+
+    missing_sex =
+      sum(
+        is.na(sex)
+      ),
+
+    missing_bmi =
+      sum(
+        is.na(bmi)
+      ),
+
+    complete_age_sex_bmi =
+      sum(
+        complete.cases(
+          age,
+          sex,
+          bmi
+        )
+      )
+  )
+```
+
+---
+
+# 4. Subset phyloseq object to IR/IS participants
+
+```{r subset_phyloseq}
+
+ps_micro_iris <- prune_samples(
+  sample_names(ps_16s) %in%
+    micro_iris$SampleID,
+  ps_16s
+)
+
+# Remove genera completely absent after restricting participants
+ps_micro_iris <- prune_taxa(
+  taxa_sums(ps_micro_iris) > 0,
+  ps_micro_iris
+)
+
+# Check
+ps_micro_iris
+
+nsamples(
+  ps_micro_iris
+)
+
+ntaxa(
+  ps_micro_iris
+)
+
+# Put metadata in same order as phyloseq samples
+micro_iris <- micro_iris %>%
+
+  filter(
+    SampleID %in%
+      sample_names(
+        ps_micro_iris
+      )
+  ) %>%
+
+  arrange(
+    match(
+      SampleID,
+      sample_names(
+        ps_micro_iris
+      )
+    )
+  )
+
+# Confirm alignment
+stopifnot(
+  all(
+    micro_iris$SampleID ==
+      sample_names(
+        ps_micro_iris
+      )
+  )
+)
+```
+
+---
+
+# 5. Alpha diversity
+
+Shannon diversity is calculated using genus-level relative abundance data.
+
+The prevalence filter used later for genus-specific analyses is not applied
+before calculation of Shannon diversity.
+
+```{r alpha_diversity}
+
+alpha_temp <- estimate_richness(
+  ps_micro_iris,
+  measures = "Shannon"
+)
+
+alpha_data <- tibble(
+
+  SampleID =
+    rownames(
+      alpha_temp
+    ),
+
+  Shannon =
+    alpha_temp$Shannon
+
+) %>%
+
+  left_join(
+    micro_iris,
+    by = "SampleID"
+  )
+
+# Inspect
+alpha_data %>%
+
+  select(
+    SampleID,
+    SubjectID,
+    ir_is_classification,
+    Shannon
+  ) %>%
+
+  head()
+```
+
+---
+
+## 5.1 Prepare alpha-diversity model population
+
+```{r alpha_model_population}
+
+alpha_model_data <- alpha_data %>%
+
+  filter(
+    !is.na(Shannon),
+    !is.na(age),
+    !is.na(sex),
+    !is.na(bmi)
+  ) %>%
+
+  mutate(
+
+    # Standardize Shannon within actual model population
+    Shannon_z = as.numeric(
+      scale(
+        Shannon
+      )
+    ),
+
+    sex = factor(
+      sex
+    )
+  )
+
+# Sample size
+alpha_model_data %>%
+  summarise(
+
+    n =
+      n(),
+
+    n_IR =
+      sum(
+        IR_binary == 1
+      ),
+
+    n_IS =
+      sum(
+        IR_binary == 0
+      )
+  )
+```
+
+---
+
+## 5.2 Logistic regression for Shannon diversity
+
+```{r alpha_logistic}
+
+model_alpha <- glm(
+
+  IR_binary ~
+    Shannon_z +
+    age +
+    sex +
+    bmi,
+
+  family =
+    binomial(),
+
+  data =
+    alpha_model_data,
+
+  control =
+    glm.control(
+      maxit = 100
+    )
+)
+
+summary(
+  model_alpha
+)
+
+model_alpha$converged
+```
+
+---
+
+## 5.3 Extract Shannon diversity result
+
+```{r alpha_results}
+
+alpha_coef <- summary(
+  model_alpha
+)$coefficients[
+  "Shannon_z",
+]
+
+alpha_result <- tibble(
+
+  variable =
+    "Shannon diversity",
+
+  n =
+    nobs(
+      model_alpha
+    ),
+
+  beta =
+    unname(
+      alpha_coef[
+        "Estimate"
+      ]
+    ),
+
+  SE =
+    unname(
+      alpha_coef[
+        "Std. Error"
+      ]
+    ),
+
+  OR =
+    exp(
+      unname(
+        alpha_coef[
+          "Estimate"
+        ]
+      )
+    ),
+
+  CI_lower =
+    exp(
+      unname(
+        alpha_coef[
+          "Estimate"
+        ]
+      ) -
+        1.96 *
+        unname(
+          alpha_coef[
+            "Std. Error"
+          ]
+        )
+    ),
+
+  CI_upper =
+    exp(
+      unname(
+        alpha_coef[
+          "Estimate"
+        ]
+      ) +
+        1.96 *
+        unname(
+          alpha_coef[
+            "Std. Error"
+          ]
+        )
+    ),
+
+  p_value =
+    unname(
+      alpha_coef[
+        "Pr(>|z|)"
+      ]
+    ),
+
+  converged =
+    model_alpha$converged
+)
+
+alpha_result
+```
+
+---
+
+## 5.4 Plot Shannon diversity
+
+```{r alpha_final_plot}
+
+alpha_model_label <- paste0(
+
+  "Adjusted OR per 1-SD higher Shannon = ",
+
+  sprintf(
+    "%.2f",
+    alpha_result$OR
+  ),
+
+  " (95% CI ",
+
+  sprintf(
+    "%.2f",
+    alpha_result$CI_lower
+  ),
+
+  "–",
+
+  sprintf(
+    "%.2f",
+    alpha_result$CI_upper
+  ),
+
+  "), P = ",
+
+  format.pval(
+    alpha_result$p_value,
+    digits = 2,
+    eps = 0.001
+  )
+)
+
+alpha_plot <- ggplot(
+
+  alpha_model_data,
+
+  aes(
+    x = ir_is_classification,
+    y = Shannon,
+    fill = ir_is_classification,
+    color = ir_is_classification
+  )
+
+) +
+
+  geom_boxplot(
+    alpha = 0.35,
+    outlier.shape = NA,
+    width = 0.55
+  ) +
+
+  geom_jitter(
+    width = 0.12,
+    height = 0,
+    size = 2.5,
+    alpha = 0.8
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "IS" = "#4C78A8",
+      "IR" = "#E45756"
+    )
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "IS" = "#4C78A8",
+      "IR" = "#E45756"
+    )
+  ) +
+
+  labs(
+
+    x =
+      "Insulin resistance classification",
+
+    y =
+      "Shannon diversity",
+
+    title =
+      "Gut microbial alpha diversity by IR/IS status",
+
+    subtitle =
+      alpha_model_label
+  ) +
+
+  theme_classic() +
+
+  theme(
+    legend.position =
+      "none"
+  )
+
+alpha_plot
+```
+
+---
+
+## 5.5 Save alpha-diversity plot
+
+```{r save_alpha_plot}
+
+ggsave(
+
+  filename = file.path(
+    figures_dir,
+    "iPOP_Shannon_IRIS.png"
+  ),
+
+  plot =
+    alpha_plot,
+
+  width =
+    7,
+
+  height =
+    5,
+
+  units =
+    "in",
+
+  dpi =
+    300,
+
+  bg =
+    "white"
+)
+```
+
+---
+
+# 6. Beta diversity
+
+Bray-Curtis dissimilarity is calculated using genus-level relative
+abundance data.
+
+```{r prepare_beta_diversity}
+
+# Complete-case population
+beta_meta <- micro_iris %>%
+
+  filter(
+    !is.na(age),
+    !is.na(sex),
+    !is.na(bmi)
+  ) %>%
+
+  mutate(
+    sex = factor(
+      sex
+    )
+  )
+
+# Sample size
+beta_meta %>%
+  summarise(
+
+    n =
+      n(),
+
+    n_IR =
+      sum(
+        IR_binary == 1
+      ),
+
+    n_IS =
+      sum(
+        IR_binary == 0
+      )
+  )
+
+# Extract relative-abundance matrix
+otu_rel <- as(
+  otu_table(
+    ps_micro_iris
+  ),
+  "matrix"
+)
+
+# Samples must be rows
+if (
+  taxa_are_rows(
+    ps_micro_iris
+  )
+) {
+
+  otu_rel <- t(
+    otu_rel
+  )
+}
+
+# Keep beta-analysis participants
+otu_rel <- otu_rel[
+  beta_meta$SampleID,
+  ,
+  drop = FALSE
+]
+
+# Confirm sample order
+stopifnot(
+  all(
+    rownames(
+      otu_rel
+    ) ==
+      beta_meta$SampleID
+  )
+)
+
+# Bray-Curtis dissimilarity
+bray_dist <- vegdist(
+  otu_rel,
+  method = "bray"
+)
+```
+
+---
+
+## 6.1 PERMANOVA
+
+```{r permanova}
+
+beta_meta <- as.data.frame(
+  beta_meta
+)
+
+rownames(
+  beta_meta
+) <- beta_meta$SampleID
+
+# Put metadata in exact distance-matrix order
+beta_meta <- beta_meta[
+
+  attr(
+    bray_dist,
+    "Labels"
+  ),
+
+  ,
+
+  drop = FALSE
+]
+
+# Confirm alignment
+stopifnot(
+  all(
+    rownames(
+      beta_meta
+    ) ==
+      attr(
+        bray_dist,
+        "Labels"
+      )
+  )
+)
+
+set.seed(
+  1234
+)
+
+permanova_result <- adonis2(
+
+  bray_dist ~
+    ir_is_classification +
+    age +
+    sex +
+    bmi,
+
+  data =
+    beta_meta,
+
+  permutations =
+    9999,
+
+  by =
+    "margin"
+)
+
+permanova_result
+```
+
+---
+
+## 6.2 Extract IR/IS PERMANOVA result
+
+```{r permanova_extract}
+
+permanova_table <- permanova_result %>%
+
+  as.data.frame() %>%
+
+  rownames_to_column(
+    var = "term"
+  )
+
+permanova_table
+
+permanova_iris <- permanova_table %>%
+
+  filter(
+    term ==
+      "ir_is_classification"
+  )
+
+permanova_iris
+```
+
+---
+
+## 6.3 Check homogeneity of multivariate dispersion
+
+```{r betadisper}
+
+dispersion_model <- betadisper(
+
+  bray_dist,
+
+  group =
+    beta_meta$ir_is_classification
+)
+
+set.seed(
+  1234
+)
+
+dispersion_test <- permutest(
+
+  dispersion_model,
+
+  permutations =
+    9999
+)
+
+dispersion_test
+```
+
+A non-significant dispersion test indicates that there is no evidence
+that within-group multivariate dispersion differs between IR and IS.
+
+---
+
+## 6.4 PCoA visualization
+
+The PCoA is an unconstrained descriptive visualization. Adjusted PERMANOVA
+results are reported separately.
+
+```{r pcoa}
+
+pcoa_result <- cmdscale(
+
+  bray_dist,
+
+  k =
+    2,
+
+  eig =
+    TRUE,
+
+  add =
+    TRUE
+)
+
+# Plotting dataframe
+pcoa_data <- tibble(
+
+  SampleID =
+    rownames(
+      pcoa_result$points
+    ),
+
+  PCoA1 =
+    pcoa_result$points[
+      ,
+      1
+    ],
+
+  PCoA2 =
+    pcoa_result$points[
+      ,
+      2
+    ]
+
+) %>%
+
+  left_join(
+
+    beta_meta %>%
+      select(
+        SampleID,
+        ir_is_classification
+      ),
+
+    by =
+      "SampleID"
+  )
+
+# Percent variation
+positive_eigenvalues <-
+  pcoa_result$eig[
+    pcoa_result$eig > 0
+  ]
+
+PCoA1_percent <-
+  100 *
+  pcoa_result$eig[1] /
+  sum(
+    positive_eigenvalues
+  )
+
+PCoA2_percent <-
+  100 *
+  pcoa_result$eig[2] /
+  sum(
+    positive_eigenvalues
+  )
+
+# Plot
+beta_plot <- ggplot(
+
+  pcoa_data,
+
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = ir_is_classification
+  )
+
+) +
+
+  geom_point(
+    size = 3,
+    alpha = 0.85
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "IS" = "#4C78A8",
+      "IR" = "#E45756"
+    )
+  ) +
+
+  labs(
+
+    x = paste0(
+      "PCoA1 (",
+      round(
+        PCoA1_percent,
+        1
+      ),
+      "%)"
+    ),
+
+    y = paste0(
+      "PCoA2 (",
+      round(
+        PCoA2_percent,
+        1
+      ),
+      "%)"
+    ),
+
+    color =
+      "IR/IS classification",
+
+    title =
+      "Bray-Curtis beta diversity by IR/IS status"
+  ) +
+
+  theme_classic()
+
+beta_plot
+```
+
+---
+
+## 6.5 Save beta-diversity plot
+
+```{r save_beta_plot}
+
+ggsave(
+
+  filename = file.path(
+    figures_dir,
+    "iPOP_BrayCurtis_IRIS_PCoA.png"
+  ),
+
+  plot =
+    beta_plot,
+
+  width =
+    7,
+
+  height =
+    5,
+
+  units =
+    "in",
+
+  dpi =
+    300,
+
+  bg =
+    "white"
+)
+```
+
+---
+
+# 7. Prepare genus abundance matrix for CLR analysis
+
+```{r prepare_clr}
+
+# Complete-case genus analysis population
+micro_genus <- micro_iris %>%
+
+  filter(
+    !is.na(age),
+    !is.na(sex),
+    !is.na(bmi)
+  ) %>%
+
+  mutate(
+    sex = factor(
+      sex
+    )
+  )
+
+# Sample size
+micro_genus %>%
+  summarise(
+
+    n =
+      n(),
+
+    n_IR =
+      sum(
+        IR_binary == 1
+      ),
+
+    n_IS =
+      sum(
+        IR_binary == 0
+      )
+  )
+
+# Extract genus abundance matrix
+otu_clr_input <- as(
+
+  otu_table(
+    ps_micro_iris
+  ),
+
+  "matrix"
+)
+
+# Samples must be rows
+if (
+  taxa_are_rows(
+    ps_micro_iris
+  )
+) {
+
+  otu_clr_input <- t(
+    otu_clr_input
+  )
+}
+
+# Restrict to complete-case model participants
+otu_clr_input <- otu_clr_input[
+  micro_genus$SampleID,
+  ,
+  drop = FALSE
+]
+
+# Check alignment
+stopifnot(
+  all(
+    rownames(
+      otu_clr_input
+    ) ==
+      micro_genus$SampleID
+  )
+)
+
+dim(
+  otu_clr_input
+)
+
+# Missing values
+sum(
+  is.na(
+    otu_clr_input
+  )
+)
+```
+
+---
+
+## 7.1 Assign genus names
+
+```{r genus_names}
+
+tax_df <- as.data.frame(
+  tax_table(
+    ps_micro_iris
+  )
+)
+
+# Match taxonomy order
+tax_df <- tax_df[
+  colnames(
+    otu_clr_input
+  ),
+  ,
+  drop = FALSE
+]
+
+# Genus labels
+genus_labels <- as.character(
+  tax_df$Taxon
+)
+
+# Replace missing labels with taxon ID
+missing_genus <-
+  is.na(
+    genus_labels
+  ) |
+  genus_labels == ""
+
+genus_labels[
+  missing_genus
+] <- colnames(
+  otu_clr_input
+)[
+  missing_genus
+]
+
+# Ensure uniqueness
+genus_labels <- make.unique(
+  genus_labels
+)
+
+# Rename matrix columns
+colnames(
+  otu_clr_input
+) <- genus_labels
+
+colnames(
+  otu_clr_input
+)
+```
+
+---
+
+# 8. Genus prevalence filtering
+
+Genera are retained if detected in at least 20% of the genus-analysis
+population.
+
+```{r prevalence_filter}
+
+genus_prevalence <- colMeans(
+  otu_clr_input > 0
+)
+
+prevalence_all <- tibble(
+
+  genus =
+    names(
+      genus_prevalence
+    ),
+
+  prevalence =
+    as.numeric(
+      genus_prevalence
+    )
+
+) %>%
+
+  arrange(
+    desc(
+      prevalence
+    )
+  )
+
+prevalence_all
+```
+
+---
+
+## 8.1 Apply prevalence threshold
+
+```{r apply_prevalence_filter}
+
+keep_genera <-
+  genus_prevalence >=
+  prev_cut
+
+n_genera_before <-
+  ncol(
+    otu_clr_input
+  )
+
+otu_clr_filtered <-
+  otu_clr_input[
+    ,
+    keep_genera,
+    drop = FALSE
+  ]
+
+prevalence_table <- prevalence_all %>%
+
+  filter(
+    prevalence >=
+      prev_cut
+  )
+
+n_genera_after <-
+  ncol(
+    otu_clr_filtered
+  )
+
+n_genera_before
+
+n_genera_after
+
+prevalence_table
+```
+
+---
+
+# 9. Replace zeros before CLR transformation
+
+```{r zero_replacement}
+
+# Smallest positive abundance
+min_positive <- min(
+
+  otu_clr_filtered[
+    otu_clr_filtered > 0
+  ],
+
+  na.rm =
+    TRUE
+)
+
+# Pseudocount
+pseudocount <-
+  min_positive / 2
+
+pseudocount
+
+# Replace zeros
+otu_positive <-
+  otu_clr_filtered
+
+otu_positive[
+  otu_positive == 0
+] <- pseudocount
+
+# Confirm no zeros
+sum(
+  otu_positive == 0
+)
+```
+
+---
+
+# 10. CLR transformation
+
+```{r clr_transform}
+
+log_abundance <- log(
+  otu_positive
+)
+
+clr_matrix <- sweep(
+
+  log_abundance,
+
+  1,
+
+  rowMeans(
+    log_abundance
+  ),
+
+  FUN =
+    "-"
+)
+
+dim(
+  clr_matrix
+)
+
+# CLR should average approximately zero within participant
+summary(
+  rowMeans(
+    clr_matrix
+  )
+)
+```
+
+---
+
+# 11. Standardize CLR genus abundance
+
+```{r standardize_clr}
+
+genus_sd <- apply(
+
+  clr_matrix,
+
+  2,
+
+  sd,
+
+  na.rm =
+    TRUE
+)
+
+# Remove zero-variance genera
+clr_matrix <- clr_matrix[
+  ,
+  genus_sd > 0,
+  drop = FALSE
+]
+
+# Standardize each genus
+clr_z <- scale(
+  clr_matrix
+)
+
+dim(
+  clr_z
+)
+```
+
+---
+
+## 11.1 Save standardized CLR genus dataset
+
+```{r save_clr}
+
+clr_output <- as.data.frame(
+  clr_z
+) %>%
+
+  rownames_to_column(
+    var =
+      "SampleID"
+  ) %>%
+
+  left_join(
+
+    micro_genus %>%
+
+      select(
+        SampleID,
+        SubjectID,
+        ir_is_classification,
+        age,
+        sex,
+        bmi,
+        sspg
+      ),
+
+    by =
+      "SampleID"
+  )
+
+write_csv(
+
+  clr_output,
+
+  file.path(
+    output_dir,
+    "iPOP_visit01_IRIS_genus_CLR_standardized.csv"
+  )
+)
+```
+
+---
+
+# 12. Genus-specific logistic regression
+
+Each genus is fitted in a separate adjusted logistic regression model.
+
+IR is coded as 1 and IS as 0.
+
+The OR therefore represents the odds of IR versus IS associated with a
+one-standard-deviation higher CLR abundance of that genus.
+
+```{r genus_logistic}
+
+genus_list <- colnames(
+  clr_z
+)
+
+genus_results_list <- lapply(
+
+  genus_list,
+
+  function(g) {
+
+    model_data <-
+      micro_genus
+
+    # Add standardized genus abundance
+    model_data$genus_z <-
+      clr_z[
+        model_data$SampleID,
+        g
+      ]
+
+    fit <- tryCatch(
+
+      glm(
+
+        IR_binary ~
+          genus_z +
+          age +
+          sex +
+          bmi,
+
+        family =
+          binomial(),
+
+        data =
+          model_data,
+
+        control =
+          glm.control(
+            maxit = 200
+          )
+      ),
+
+      error =
+        function(e)
+          NULL
+    )
+
+    # Model failure
+    if (
+      is.null(
+        fit
+      )
+    ) {
+
+      return(
+
+        tibble(
+
+          genus =
+            g,
+
+          n =
+            NA_integer_,
+
+          beta =
+            NA_real_,
+
+          SE =
+            NA_real_,
+
+          OR =
+            NA_real_,
+
+          CI_lower =
+            NA_real_,
+
+          CI_upper =
+            NA_real_,
+
+          p_value =
+            NA_real_,
+
+          converged =
+            FALSE
+        )
+      )
+    }
+
+    coef_table <- summary(
+      fit
+    )$coefficients
+
+    # Missing genus coefficient
+    if (
+      !"genus_z" %in%
+      rownames(
+        coef_table
+      )
+    ) {
+
+      return(
+
+        tibble(
+
+          genus =
+            g,
+
+          n =
+            nobs(
+              fit
+            ),
+
+          beta =
+            NA_real_,
+
+          SE =
+            NA_real_,
+
+          OR =
+            NA_real_,
+
+          CI_lower =
+            NA_real_,
+
+          CI_upper =
+            NA_real_,
+
+          p_value =
+            NA_real_,
+
+          converged =
+            fit$converged
+        )
+      )
+    }
+
+    beta <-
+      coef_table[
+        "genus_z",
+        "Estimate"
+      ]
+
+    se <-
+      coef_table[
+        "genus_z",
+        "Std. Error"
+      ]
+
+    p <-
+      coef_table[
+        "genus_z",
+        "Pr(>|z|)"
+      ]
+
+    tibble(
+
+      genus =
+        g,
+
+      n =
+        nobs(
+          fit
+        ),
+
+      beta =
+        beta,
+
+      SE =
+        se,
+
+      OR =
+        exp(
+          beta
+        ),
+
+      CI_lower =
+        exp(
+          beta -
+            1.96 * se
+        ),
+
+      CI_upper =
+        exp(
+          beta +
+            1.96 * se
+        ),
+
+      p_value =
+        p,
+
+      converged =
+        fit$converged
+    )
+  }
+)
+
+genus_results <- bind_rows(
+  genus_results_list
+)
+```
+
+---
+
+## 12.1 Add prevalence and FDR correction
+
+```{r genus_results_fdr}
+
+genus_results <- genus_results %>%
+
+  left_join(
+    prevalence_table,
+    by = "genus"
+  ) %>%
+
+  mutate(
+
+    p_FDR = p.adjust(
+      p_value,
+      method = "BH"
+    )
+
+  ) %>%
+
+  arrange(
+    p_value
+  )
+
+genus_results
+```
+
+---
+
+## 12.2 Check logistic regression convergence
+
+```{r genus_convergence}
+
+genus_results %>%
+  count(
+    converged
+  )
+
+# Failed or unavailable models
+genus_results %>%
+
+  filter(
+    !converged |
+      is.na(
+        p_value
+      )
+  )
+```
+
+---
+
+## 12.3 Nominally associated genera
+
+These are exploratory associations with nominal P < 0.05.
+
+```{r nominal_genera}
+
+genus_nominal_results <- genus_results %>%
+
+  filter(
+    !is.na(
+      p_value
+    ),
+    p_value < 0.05
+  ) %>%
+
+  select(
+    genus,
+    n,
+    prevalence,
+    beta,
+    SE,
+    OR,
+    CI_lower,
+    CI_upper,
+    p_value,
+    p_FDR,
+    converged
+  )
+
+genus_nominal_results
+```
+
+---
+
+## 12.4 FDR-significant genera
+
+```{r fdr_genera}
+
+genus_fdr_results <- genus_results %>%
+
+  filter(
+    !is.na(
+      p_FDR
+    ),
+    p_FDR < 0.05
+  ) %>%
+
+  select(
+    genus,
+    n,
+    prevalence,
+    beta,
+    SE,
+    OR,
+    CI_lower,
+    CI_upper,
+    p_value,
+    p_FDR,
+    converged
+  )
+
+genus_fdr_results
+```
+
+---
+
+## 12.5 Prepare nominal genus results for forest plot
+
+Only genera with nominal P < 0.05 are included in this visualization.
+
+The plot is intended to show the direction and magnitude of exploratory
+genus-specific associations.
+
+```{r genus_plot_data}
+
+genus_plot_data <- genus_results %>%
+
+  filter(
+
+    converged,
+
+    !is.na(
+      p_value
+    ),
+
+    p_value < 0.05,
+
+    !is.na(
+      OR
+    ),
+
+    !is.na(
+      CI_lower
+    ),
+
+    !is.na(
+      CI_upper
+    ),
+
+    is.finite(
+      OR
+    ),
+
+    is.finite(
+      CI_lower
+    ),
+
+    is.finite(
+      CI_upper
+    ),
+
+    OR > 0,
+
+    CI_lower > 0,
+
+    CI_upper > 0
+  ) %>%
+
+  mutate(
+
+    direction = case_when(
+
+      OR > 1 ~
+        "Higher odds of IR",
+
+      OR < 1 ~
+        "Lower odds of IR",
+
+      TRUE ~
+        "OR = 1"
+    ),
+
+    genus_plot = reorder(
+      genus,
+      OR
+    )
+  )
+
+genus_plot_data
+```
+
+---
+
+## 12.6 Forest plot of nominally associated genera
+
+The dashed line at OR = 1 indicates no association.
+
+Red indicates an OR above 1 and therefore higher odds of IR per
+one-standard-deviation higher CLR abundance.
+
+Blue indicates an OR below 1 and therefore lower odds of IR per
+one-standard-deviation higher CLR abundance.
+
+```{r genus_forest_plot}
+
+if (
+  nrow(
+    genus_plot_data
+  ) > 0
+) {
+
+  genus_forest_plot <- ggplot(
+
+    genus_plot_data,
+
+    aes(
+      x = OR,
+      y = genus_plot,
+      color = direction
+    )
+
+  ) +
+
+    geom_vline(
+
+      xintercept =
+        1,
+
+      linetype =
+        "dashed",
+
+      linewidth =
+        0.6,
+
+      color =
+        "grey40"
+    ) +
+
+    geom_segment(
+
+      aes(
+        x = CI_lower,
+        xend = CI_upper,
+        y = genus_plot,
+        yend = genus_plot
+      ),
+
+      linewidth =
+        0.7
+    ) +
+
+    geom_point(
+      size = 3
+    ) +
+
+    scale_x_log10() +
+
+    scale_color_manual(
+
+      values = c(
+
+        "Lower odds of IR" =
+          "#4C78A8",
+
+        "Higher odds of IR" =
+          "#E45756",
+
+        "OR = 1" =
+          "grey40"
+      )
+    ) +
+
+    labs(
+
+      x =
+        "Adjusted OR for IR per 1-SD higher CLR abundance",
+
+      y =
+        NULL,
+
+      color =
+        "Direction",
+
+      title =
+        "Genus-specific associations with insulin resistance",
+
+      subtitle =
+        "Nominal associations (P < 0.05); adjusted for age, sex, and BMI"
+    ) +
+
+    theme_classic() +
+
+    theme(
+
+      legend.position =
+        "bottom",
+
+      axis.text.y =
+        element_text(
+          size = 10
+        )
+    )
+
+  genus_forest_plot
+
+} else {
+
+  message(
+    "No genera had nominal P < 0.05."
+  )
+}
+```
+
+---
+
+## 12.7 Save genus forest plot
+
+```{r save_genus_plot}
+
+if (
+  nrow(
+    genus_plot_data
+  ) > 0
+) {
+
+  genus_plot_height <- max(
+
+    5,
+
+    0.55 *
+      nrow(
+        genus_plot_data
+      ) +
+      2
+  )
+
+  ggsave(
+
+    filename = file.path(
+      figures_dir,
+      "iPOP_genus_IRIS_nominal_forest_plot.png"
+    ),
+
+    plot =
+      genus_forest_plot,
+
+    width =
+      8,
+
+    height =
+      genus_plot_height,
+
+    units =
+      "in",
+
+    dpi =
+      300,
+
+    bg =
+      "white"
+  )
+}
+```
+
+---
+
+## 12.8 Save genus-specific results
+
+```{r save_genus_results}
+
+# All genus prevalence values
+write_csv(
+
+  prevalence_all,
+
+  file.path(
+    output_dir,
+    "iPOP_genus_prevalence_visit01_IRIS.csv"
+  )
+)
+
+# Retained genus prevalence values
+write_csv(
+
+  prevalence_table,
+
+  file.path(
+    output_dir,
+    "iPOP_genus_prevalence_retained_visit01_IRIS.csv"
+  )
+)
+
+# Full results for every tested genus
+write_csv(
+
+  genus_results,
+
+  file.path(
+    output_dir,
+    "iPOP_genus_IRIS_logistic_results.csv"
+  )
+)
+
+# Nominal P < 0.05 results
+write_csv(
+
+  genus_nominal_results,
+
+  file.path(
+    output_dir,
+    "iPOP_genus_IRIS_nominal_p_lt_0.05.csv"
+  )
+)
+
+# FDR < 0.05 results
+write_csv(
+
+  genus_fdr_results,
+
+  file.path(
+    output_dir,
+    "iPOP_genus_IRIS_FDR_lt_0.05.csv"
+  )
+)
+
+# Data underlying genus forest plot
+write_csv(
+
+  genus_plot_data %>%
+    select(
+      -genus_plot
+    ),
+
+  file.path(
+    output_dir,
+    "iPOP_genus_IRIS_nominal_forest_plot_data.csv"
+  )
+)
+```
+
+---
+
+# 13. Load E11 TMAO data with subject metadata
+
+```{r load_tmao}
+
+tmao_data <- read_csv(
+
+  file.path(
+    output_dir,
+    "iPOP_TMAO_E11_with_metadata.csv"
+  ),
+
+  show_col_types =
+    FALSE
+)
+
+# Inspect
+dim(
+  tmao_data
+)
+
+head(
+  tmao_data
+)
+
+# IR/IS distribution
+tmao_data %>%
+  count(
+    ir_is_classification
+  )
+```
+
+---
+
+# 14. Prepare TMAO analysis population
+
+Participants classified as IR or IS with non-missing TMAO, age, sex,
+and BMI are retained.
+
+```{r prepare_tmao_analysis}
+
+tmao_iris <- tmao_data %>%
+
+  filter(
+
+    ir_is_classification %in%
+      c(
+        "IR",
+        "IS"
+      ),
+
+    !is.na(
+      TMAO_log2
+    ),
+
+    !is.na(
+      age
+    ),
+
+    !is.na(
+      sex
+    ),
+
+    !is.na(
+      bmi
+    )
+  ) %>%
+
+  mutate(
+
+    # IR = 1, IS = 0
+    IR_binary = if_else(
+      ir_is_classification == "IR",
+      1,
+      0
+    ),
+
+    ir_is_classification = factor(
+      ir_is_classification,
+      levels = c(
+        "IS",
+        "IR"
+      )
+    ),
+
+    sex = factor(
+      sex
+    )
+  )
+
+# Final TMAO sample size
+tmao_iris %>%
+
+  summarise(
+
+    n_total =
+      n(),
+
+    n_subjects =
+      n_distinct(
+        SubjectID
+      ),
+
+    n_IR =
+      sum(
+        IR_binary == 1
+      ),
+
+    n_IS =
+      sum(
+        IR_binary == 0
+      )
+  )
+
+tmao_iris %>%
+  count(
+    ir_is_classification
+  )
+```
+
+---
+
+# 15. Describe TMAO by IR/IS status
+
+```{r tmao_descriptive}
+
+tmao_descriptive <- tmao_iris %>%
+
+  group_by(
+    ir_is_classification
+  ) %>%
+
+  summarise(
+
+    n =
+      n(),
+
+    mean_log2_TMAO =
+      mean(
+        TMAO_log2,
+        na.rm = TRUE
+      ),
+
+    sd_log2_TMAO =
+      sd(
+        TMAO_log2,
+        na.rm = TRUE
+      ),
+
+    median_log2_TMAO =
+      median(
+        TMAO_log2,
+        na.rm = TRUE
+      ),
+
+    IQR_log2_TMAO =
+      IQR(
+        TMAO_log2,
+        na.rm = TRUE
+      ),
+
+    .groups =
+      "drop"
+  )
+
+tmao_descriptive
+```
+
+---
+
+# 16. Descriptive TMAO visualization
+
+This figure displays the observed TMAO distribution and is not an adjusted
+model-based figure.
+
+```{r tmao_descriptive_plot}
+
+tmao_plot <- ggplot(
+
+  tmao_iris,
+
+  aes(
+    x = ir_is_classification,
+    y = TMAO_log2,
+    fill = ir_is_classification,
+    color = ir_is_classification
+  )
+
+) +
+
+  geom_boxplot(
+
+    alpha =
+      0.35,
+
+    outlier.shape =
+      NA,
+
+    width =
+      0.55
+  ) +
+
+  geom_jitter(
+
+    width =
+      0.12,
+
+    height =
+      0,
+
+    size =
+      2.5,
+
+    alpha =
+      0.8
+  ) +
+
+  scale_fill_manual(
+
+    values = c(
+      "IS" = "#4C78A8",
+      "IR" = "#E45756"
+    )
+  ) +
+
+  scale_color_manual(
+
+    values = c(
+      "IS" = "#4C78A8",
+      "IR" = "#E45756"
+    )
+  ) +
+
+  labs(
+
+    x =
+      "Insulin resistance classification",
+
+    y =
+      "Log2 TMAO",
+
+    title =
+      "Observed circulating TMAO by IR/IS status"
+  ) +
+
+  theme_classic() +
+
+  theme(
+    legend.position =
+      "none"
+  )
+
+tmao_plot
+```
+
+---
+
+## 16.1 Save descriptive TMAO plot
+
+```{r save_tmao_descriptive_plot}
+
+ggsave(
+
+  filename = file.path(
+    figures_dir,
+    "iPOP_TMAO_IRIS_descriptive.png"
+  ),
+
+  plot =
+    tmao_plot,
+
+  width =
+    7,
+
+  height =
+    5,
+
+  units =
+    "in",
+
+  dpi =
+    300,
+
+  bg =
+    "white"
+)
+```
+
+---
+
+# 17. TMAO and IR/IS logistic regression
+
+The association between circulating TMAO and insulin resistance status is
+evaluated using logistic regression adjusted for age, sex, and BMI.
+
+Because TMAO is log2-transformed, a one-unit increase in TMAO_log2
+corresponds to a two-fold higher TMAO value.
+
+```{r tmao_logistic}
+
+model_tmao <- glm(
+
+  IR_binary ~
+    TMAO_log2 +
+    age +
+    sex +
+    bmi,
+
+  family =
+    binomial(),
+
+  data =
+    tmao_iris,
+
+  control =
+    glm.control(
+      maxit = 100
+    )
+)
+
+summary(
+  model_tmao
+)
+
+model_tmao$converged
+```
+
+---
+
+## 17.1 Extract TMAO association result
+
+```{r tmao_result}
+
+tmao_coef <- summary(
+  model_tmao
+)$coefficients[
+  "TMAO_log2",
+]
+
+tmao_result <- tibble(
+
+  predictor =
+    "TMAO_log2",
+
+  n =
+    nobs(
+      model_tmao
+    ),
+
+  beta =
+    unname(
+      tmao_coef[
+        "Estimate"
+      ]
+    ),
+
+  SE =
+    unname(
+      tmao_coef[
+        "Std. Error"
+      ]
+    ),
+
+  OR =
+    exp(
+      unname(
+        tmao_coef[
+          "Estimate"
+        ]
+      )
+    ),
+
+  CI_lower =
+    exp(
+      unname(
+        tmao_coef[
+          "Estimate"
+        ]
+      ) -
+        1.96 *
+        unname(
+          tmao_coef[
+            "Std. Error"
+          ]
+        )
+    ),
+
+  CI_upper =
+    exp(
+      unname(
+        tmao_coef[
+          "Estimate"
+        ]
+      ) +
+        1.96 *
+        unname(
+          tmao_coef[
+            "Std. Error"
+          ]
+        )
+    ),
+
+  p_value =
+    unname(
+      tmao_coef[
+        "Pr(>|z|)"
+      ]
+    ),
+
+  converged =
+    model_tmao$converged
+)
+
+tmao_result
+```
+
+---
+
+## 17.2 Calculate adjusted predicted probability of IR across TMAO
+
+Marginal standardized predictions are calculated across the observed TMAO
+range.
+
+At each TMAO value, predictions are generated using the observed age, sex,
+and BMI values of the analysis participants and then averaged.
+
+```{r tmao_predictions}
+
+# Sequence across observed TMAO range
+tmao_grid <- seq(
+
+  min(
+    tmao_iris$TMAO_log2,
+    na.rm = TRUE
+  ),
+
+  max(
+    tmao_iris$TMAO_log2,
+    na.rm = TRUE
+  ),
+
+  length.out =
+    100
+)
+
+# Model coefficients
+beta_hat <- coef(
+  model_tmao
+)
+
+# Variance-covariance matrix
+vcov_hat <- vcov(
+  model_tmao
+)
+
+# Predictor terms without response
+model_terms <- delete.response(
+  terms(
+    model_tmao
+  )
+)
+
+# Predictions across TMAO values
+tmao_prediction_list <- lapply(
+
+  tmao_grid,
+
+  function(x) {
+
+    newdata <-
+      tmao_iris
+
+    # Give each participant the same TMAO value
+    newdata$TMAO_log2 <-
+      x
+
+    # Model matrix
+    X <- model.matrix(
+      model_terms,
+      data = newdata
+    )
+
+    # Align coefficient order
+    X <- X[
+      ,
+      names(
+        beta_hat
+      ),
+      drop = FALSE
+    ]
+
+    # Linear predictor
+    eta <- as.vector(
+      X %*%
+        beta_hat
+    )
+
+    # Participant-specific predicted probabilities
+    prob <- plogis(
+      eta
+    )
+
+    # Average adjusted probability
+    adjusted_probability <- mean(
+      prob
+    )
+
+    # Delta-method gradient
+    gradient_matrix <- sweep(
+
+      X,
+
+      1,
+
+      prob *
+        (
+          1 -
+            prob
+        ),
+
+      FUN =
+        "*"
+    )
+
+    gradient <- colMeans(
+      gradient_matrix
+    )
+
+    variance <- as.numeric(
+
+      t(
+        gradient
+      ) %*%
+
+        vcov_hat %*%
+
+        gradient
+    )
+
+    SE <- sqrt(
+      variance
+    )
+
+    tibble(
+
+      TMAO_log2 =
+        x,
+
+      predicted_probability_IR =
+        adjusted_probability,
+
+      SE =
+        SE,
+
+      CI_lower =
+        pmax(
+          0,
+          adjusted_probability -
+            1.96 * SE
+        ),
+
+      CI_upper =
+        pmin(
+          1,
+          adjusted_probability +
+            1.96 * SE
+        )
+    )
+  }
+)
+
+tmao_predictions <- bind_rows(
+  tmao_prediction_list
+)
+
+tmao_predictions
+```
+
+---
+
+## 17.3 Plot adjusted TMAO association
+
+This figure is generated from the adjusted logistic regression model.
+
+```{r tmao_adjusted_plot}
+
+tmao_model_label <- paste0(
+
+  "Adjusted OR per 2-fold higher TMAO value = ",
+
+  sprintf(
+    "%.2f",
+    tmao_result$OR
+  ),
+
+  " (95% CI ",
+
+  sprintf(
+    "%.2f",
+    tmao_result$CI_lower
+  ),
+
+  "–",
+
+  sprintf(
+    "%.2f",
+    tmao_result$CI_upper
+  ),
+
+  "), P = ",
+
+  format.pval(
+    tmao_result$p_value,
+    digits = 2,
+    eps = 0.001
+  )
+)
+
+tmao_adjusted_plot <- ggplot(
+
+  tmao_predictions,
+
+  aes(
+    x = TMAO_log2,
+    y = predicted_probability_IR
+  )
+
+) +
+
+  geom_ribbon(
+
+    aes(
+      ymin = CI_lower,
+      ymax = CI_upper
+    ),
+
+    alpha =
+      0.20,
+
+    fill =
+      "#E45756"
+  ) +
+
+  geom_line(
+
+    linewidth =
+      1.2,
+
+    color =
+      "#E45756"
+  ) +
+
+  geom_rug(
+
+    data =
+      tmao_iris,
+
+    aes(
+      x = TMAO_log2
+    ),
+
+    inherit.aes =
+      FALSE,
+
+    sides =
+      "b",
+
+    alpha =
+      0.45
+  ) +
+
+  labs(
+
+    x =
+      "Log2 TMAO",
+
+    y =
+      "Adjusted predicted probability of IR",
+
+    title =
+      "Adjusted association between circulating TMAO and insulin resistance",
+
+    subtitle =
+      tmao_model_label
+  ) +
+
+  theme_classic()
+
+tmao_adjusted_plot
+```
+
+---
+
+## 17.4 Save adjusted TMAO plot
+
+```{r save_tmao_adjusted_plot}
+
+ggsave(
+
+  filename = file.path(
+    figures_dir,
+    "iPOP_TMAO_IRIS_adjusted_probability.png"
+  ),
+
+  plot =
+    tmao_adjusted_plot,
+
+  width =
+    7,
+
+  height =
+    5,
+
+  units =
+    "in",
+
+  dpi =
+    300,
+
+  bg =
+    "white"
+)
+```
+
+---
+
+# 18. Save TMAO analysis data and results
+
+```{r save_tmao_results}
+
+# Analysis population
+write_csv(
+
+  tmao_iris,
+
+  file.path(
+    output_dir,
+    "iPOP_TMAO_E11_IRIS_analysis_data.csv"
+  )
+)
+
+# Descriptive statistics
+write_csv(
+
+  tmao_descriptive,
+
+  file.path(
+    output_dir,
+    "iPOP_TMAO_E11_IRIS_descriptive.csv"
+  )
+)
+
+# Logistic regression result
+write_csv(
+
+  tmao_result,
+
+  file.path(
+    output_dir,
+    "iPOP_TMAO_E11_IRIS_logistic_result.csv"
+  )
+)
+
+# Adjusted prediction data
+write_csv(
+
+  tmao_predictions,
+
+  file.path(
+    output_dir,
+    "iPOP_TMAO_E11_IRIS_adjusted_predictions.csv"
+  )
+)
+```
+
+---
+
+# 19. Save alpha-diversity results
+
+```{r save_alpha_result}
+
+# Logistic regression result
+write_csv(
+
+  alpha_result,
+
+  file.path(
+    output_dir,
+    "iPOP_Shannon_IRIS_logistic_result.csv"
+  )
+)
+
+# Analysis data
+write_csv(
+
+  alpha_model_data,
+
+  file.path(
+    output_dir,
+    "iPOP_Shannon_IRIS_analysis_data.csv"
+  )
+)
+```
+
+---
+
+# 20. Save beta-diversity results
+
+```{r save_beta_result}
+
+# Complete PERMANOVA table
+permanova_table <-
+  permanova_result %>%
+
+  as.data.frame() %>%
+
+  rownames_to_column(
+    var = "term"
+  )
+
+write_csv(
+
+  permanova_table,
+
+  file.path(
+    output_dir,
+    "iPOP_BrayCurtis_IRIS_PERMANOVA.csv"
+  )
+)
+
+# IR/IS-specific PERMANOVA result
+write_csv(
+
+  permanova_iris,
+
+  file.path(
+    output_dir,
+    "iPOP_BrayCurtis_IRIS_PERMANOVA_IRIS_result.csv"
+  )
+)
+
+# Dispersion result
+dispersion_table <- tibble(
+
+  statistic =
+    unname(
+      dispersion_test$tab[
+        1,
+        "F"
+      ]
+    ),
+
+  p_value =
+    unname(
+      dispersion_test$tab[
+        1,
+        "Pr(>F)"
+      ]
+    )
+)
+
+write_csv(
+
+  dispersion_table,
+
+  file.path(
+    output_dir,
+    "iPOP_BrayCurtis_IRIS_dispersion_test.csv"
+  )
+)
+
+# PCoA coordinates
+write_csv(
+
+  pcoa_data,
+
+  file.path(
+    output_dir,
+    "iPOP_BrayCurtis_IRIS_PCoA_coordinates.csv"
+  )
+)
+```
+
+---
+
+# 21. Save microbiome analysis metadata
+
+```{r save_microbiome_analysis_metadata}
+
+# All Visit 01 known IR/IS participants
+write_csv(
+
+  micro_iris,
+
+  file.path(
+    output_dir,
+    "iPOP_visit01_IRIS_microbiome_analysis_metadata.csv"
+  )
+)
+
+# Genus-analysis complete-case population
+write_csv(
+
+  micro_genus,
+
+  file.path(
+    output_dir,
+    "iPOP_visit01_IRIS_genus_analysis_metadata.csv"
+  )
+)
+
+# Beta-diversity complete-case population
+write_csv(
+
+  beta_meta,
+
+  file.path(
+    output_dir,
+    "iPOP_visit01_IRIS_beta_analysis_metadata.csv"
+  )
+)
+```
+
+---
+
+# 22. Analysis summary
+
+The microbiome analysis uses first-visit (Visit 01) genus-level microbiome
+data from participants classified as insulin resistant or insulin sensitive.
+
+Shannon diversity is used to evaluate alpha diversity. Logistic regression
+evaluates the association between a one-standard-deviation higher Shannon
+diversity and odds of IR after adjustment for age, sex, and BMI.
+
+Bray-Curtis dissimilarity is used to evaluate beta diversity. Overall
+microbial community composition is evaluated using PERMANOVA adjusted for
+age, sex, and BMI. Homogeneity of multivariate dispersion is evaluated
+separately. PCoA provides an unconstrained descriptive visualization of
+Bray-Curtis community structure, while adjusted PERMANOVA statistics are
+reported separately.
+
+For genus-specific analyses, genera are required to be present in at least
+20% of participants in the complete-case genus-analysis population. Zeros
+are replaced with one-half of the smallest observed non-zero relative
+abundance among retained genera.
+
+The filtered abundance matrix is CLR-transformed and each retained genus is
+standardized to mean zero and standard deviation one.
+
+Separate logistic regression models are fitted for each genus, with IR/IS
+status as the binary outcome and age, sex, and BMI as covariates.
+Benjamini-Hochberg false discovery rate correction is applied across
+genus-specific tests.
+
+All genus-specific regression results are retained in the complete results
+table. For exploratory visualization of direction and magnitude, the forest
+plot displays only nominally associated genera with P < 0.05. These
+nominal associations should be interpreted separately from FDR-corrected
+results.
+
+The TMAO analysis is conducted separately using E11 TMAO samples with
+subject metadata already attached.
+
+Log2-transformed TMAO is evaluated for its association with IR/IS using
+logistic regression adjusted for age, sex, and BMI.
+
+The observed TMAO boxplot is retained as a descriptive visualization.
+A separate model-based figure displays the marginal adjusted predicted
+probability of IR across the observed TMAO range after accounting for age,
+sex, and BMI.
+
+A later targeted analysis can evaluate associations between circulating
+TMAO and literature-defined TMA/TMAO-related genera among participants with
+both microbiome and TMAO measurements.

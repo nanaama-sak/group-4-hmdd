@@ -1,0 +1,269 @@
+---
+title: "Metabolomics Workbench: Querying the API from R"
+author: "Keisha Harrison"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Tutorial overview
+
+The [Metabolomics Workbench](https://www.metabolomicsworkbench.org/) is a public NIH-funded repository of metabolomics data and tools. The `metabolomicsWorkbenchR` package gives you a programmatic R interface to its REST API, so you can pull data and metadata directly into your R session instead of clicking through the website.
+
+By the end of this tutorial you will be able to:
+
+- Install `metabolomicsWorkbenchR` from Bioconductor
+- Inspect the catalog of valid query types (`output_item`)
+- Run a name-based RefMet query for a single analyte
+
+**Prerequisites:** R 4.0+ and RStudio. Internet access (the API is queried over HTTPS).
+
+---
+
+# Step 1: Set up the working environment
+
+## 1.1 Install the package
+
+`metabolomicsWorkbenchR` lives on **Bioconductor**, not CRAN, so we install it through `BiocManager` rather than `install.packages()`.
+
+The `if (!require(...))` pattern below means: *"if BiocManager isn't already installed, install it; otherwise skip."* This avoids re-installing every time you knit the document.
+
+```{r install, eval=FALSE}
+# Install BiocManager (the gateway to Bioconductor packages) if missing
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# Use BiocManager to install metabolomicsWorkbenchR from Bioconductor
+BiocManager::install("metabolomicsWorkbenchR")
+```
+
+> **Note:** `eval=FALSE` in the chunk header tells RMarkdown *not* to run this chunk when knitting. You only need to install a package once per machine; running `install.packages()` every knit would be slow and unnecessary.
+
+## 1.2 Load the library
+
+`library()` attaches a package's functions to your current R session. You need to do this **every time** you start a new session, even if the package is already installed.
+
+```{r load_lib}
+library(metabolomicsWorkbenchR)
+```
+
+---
+
+# Step 2: Explore what the API can return
+
+Before running queries, it helps to see what kinds of outputs the API supports. The package ships with a built-in data frame called `output_item` that lists every valid context/input/output combination.
+
+```{r explore, eval=FALSE}
+# Opens an interactive viewer in RStudio showing all valid query types
+View(output_item)
+```
+
+> **Tip:** `View()` only works inside RStudio. If you're running this from plain R, use `head(output_item)` or `print(output_item)` instead.
+
+---
+
+# Step 3: Run a query
+
+## 3.1 Define the analyte of interest
+
+We'll search for **butyric acid**, a short-chain fatty acid produced by gut bacteria and frequently studied in microbiome-metabolomics work.
+
+```{r analyte}
+# The name we want to look up in the RefMet reference database
+study_id <- "ST002681"
+```
+
+## 3.2 URL-encode the analyte name
+
+API endpoints expect special characters (spaces, slashes, etc.) to be **percent-encoded**, so a space becomes `%20`. `utils::URLencode()` handles this for us. We set `reserved = TRUE` so it also encodes characters like `/` and `&` that have special meaning in URLs.
+
+```{r encode}
+#encode for analytes
+# analyte_enc <- utils::URLencode(analyte, reserved = TRUE)
+# analyte_enc  # have a look at what the encoded version looks like
+
+#encode for study_id
+# study_id_enc <- utils::URLencode(study_id, reserved = TRUE)
+```
+
+## 3.3 Query RefMet by name
+
+`do_query()` is the workhorse function: it builds the API URL, sends the request, parses the JSON response, and hands you back a data frame.
+
+The four arguments describe *what* you're asking for:
+
+- `context = "refmet"`: query the RefMet reference database (which standardizes metabolite naming)
+- `input_item = "name"`: we're searching by name
+- `input_value = analyte_enc`: the (encoded) search term
+- `output_item = "refmet_exact"`: we want an *exact/close-match* RefMet entry (vs. a fuzzy match)
+
+```{r query}
+df_study_data <- do_query(
+  context     = "study",
+  input_item  = "study_id",
+  input_value = study_id,
+  output_item = "data"
+)
+
+# Inspect the result
+head(df_study_data)
+```
+
+## Save metabolomics data as CSV files
+
+The study contains two analysis datasets: one from positive ion mode and one from negative ion mode. We will save each dataset as a separate CSV file inside an `output` folder in the current working directory.
+
+```{r save_csv}
+# Create an output folder if it does not already exist
+if (!dir.exists("output")) {
+  dir.create("output")
+}
+
+# Save positive ion mode data
+write.csv(
+  df_study_data$AN004353,
+  file = "output/ST002681_AN004353_positive.csv",
+  row.names = FALSE
+)
+
+# Save negative ion mode data
+write.csv(
+  df_study_data$AN004354,
+  file = "output/ST002681_AN004354_negative.csv",
+  row.names = FALSE
+)
+```
+
+
+
+
+
+
+
+
+
+
+## Prepare baseline TMAO metabolomics data
+
+The metabolomics dataset contains repeated measurements from the Exercise
+substudy. For this analysis, we define the first metabolomics timepoint
+(`E11`, or `11` if that naming convention occurs) as the baseline
+metabolomics visit.
+
+```{r load_metabolomics}
+
+# Load metabolomics data
+metab <- readr::read_csv(
+  file.path(
+    project_dir,
+    "output",
+    "Metabolomics.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# Rename the first column, which contains sample IDs
+names(metab)[1] <- "MetabSampleID"
+
+# Check dimensions and first sample IDs
+dim(metab)
+head(metab$MetabSampleID)
+```
+
+## Select baseline metabolomics visit and TMAO
+
+```{r select_baseline_tmao}
+
+tmao_baseline <- metab %>%
+
+  # Keep baseline metabolomics samples:
+  # IDs ending in -E11 or -11
+  filter(
+    grepl("-(E)?11$", MetabSampleID)
+  ) %>%
+
+  # Extract participant ID from the sample ID
+  mutate(
+    SubjectID = sub(
+      "-(E)?11$",
+      "",
+      MetabSampleID
+    ),
+
+    MetabVisitID = sub(
+      "^.*-",
+      "",
+      MetabSampleID
+    )
+  ) %>%
+
+  # Keep only variables needed for the TMAO analysis
+  select(
+    SubjectID,
+    MetabSampleID,
+    MetabVisitID,
+    TMAO_raw = `Trimethylamine N-oxide (TMAO)`
+  )
+
+# Inspect
+dim(tmao_baseline)
+head(tmao_baseline)
+```
+
+## Check baseline TMAO data
+
+```{r check_baseline_tmao}
+
+tmao_baseline %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID),
+    n_missing_TMAO = sum(is.na(TMAO_raw)),
+    n_zero_TMAO = sum(TMAO_raw == 0, na.rm = TRUE),
+    min_TMAO = min(TMAO_raw, na.rm = TRUE),
+    median_TMAO = median(TMAO_raw, na.rm = TRUE),
+    max_TMAO = max(TMAO_raw, na.rm = TRUE)
+  )
+```
+
+## Log-transform TMAO
+
+TMAO abundance is right-skewed, so TMAO is log2-transformed before
+statistical analyses.
+
+```{r log_transform_tmao}
+
+tmao_baseline <- tmao_baseline %>%
+  mutate(
+    TMAO_log2 = log2(TMAO_raw)
+  )
+
+# Inspect transformed values
+summary(tmao_baseline$TMAO_raw)
+summary(tmao_baseline$TMAO_log2)
+```
+
+## Save baseline TMAO dataset
+
+The resulting dataset contains one row per participant and is ready to
+merge with the microbiome dataset using `SubjectID`.
+
+```{r save_baseline_tmao}
+
+readr::write_csv(
+  tmao_baseline,
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_TMAO_baseline_E11.csv"
+  )
+)
+```
+

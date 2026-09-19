@@ -1,0 +1,595 @@
+---
+title: "iPOP TMAO, Gut Microbiome, and Type 2 Diabetes Analysis"
+author: "Devendra Paudel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+editor_options:
+  chunk_output_type: console
+---
+
+# Project objective
+
+The overall objective of this analysis is to examine whether circulating
+trimethylamine N-oxide (TMAO), a gut microbiota-related metabolite, is
+associated with gut microbial composition and type 2 diabetes (T2D) status
+in the iPOP cohort.
+
+For this analysis, we will select a single timepoint with both microbiome
+and metabolomics data available for the same participants.
+
+The planned workflow is:
+
+1. Load the processed iPOP 16S microbiome data.
+2. Examine available subjects and visits.
+3. Identify a common microbiome and metabolomics timepoint.
+4. Obtain the matching iPOP metabolomics dataset.
+5. Extract TMAO.
+6. Obtain T2D/clinical phenotype information.
+7. Match participants across microbiome, metabolomics, and clinical data.
+8. Conduct microbiome-TMAO-T2D analyses.
+
+---
+
+# Step 1: Load required libraries
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(phyloseq)
+
+# Define the main project directory
+project_dir <- "/Users/paude/Documents/HMDD_project"
+```
+
+---
+
+# Step 2: Load processed 16S data
+
+## 2.1 Load sample metadata
+
+```{r load_microbiome_metadata}
+micro_meta <- read_csv(
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_16S_sample_metadata.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# Inspect the data
+dim(micro_meta)
+head(micro_meta)
+colnames(micro_meta)
+```
+
+## 2.2 Load genus-level relative abundance data
+
+```{r load_microbiome}
+ps_16s <- readRDS(
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_16S_genus_relative_abundance.rds"
+  )
+)
+
+# Inspect phyloseq object
+ps_16s
+
+nsamples(ps_16s)
+ntaxa(ps_16s)
+```
+
+---
+
+# Step 3: Examine microbiome sample identifiers and visits
+
+The microbiome SampleID has already been separated into SubjectID and VisitID.
+This information will later be used to match microbiome samples to the
+metabolomics data.
+
+```{r inspect_ids}
+micro_meta %>%
+  select(
+    SampleID,
+    SubjectID,
+    VisitID,
+    VisitNumber
+  ) %>%
+  head(20)
+```
+
+Check the total number of microbiome samples and participants:
+
+```{r microbiome_sample_size}
+micro_meta %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID),
+    n_visits = n_distinct(VisitID)
+  )
+```
+
+---
+
+# Step 4: Examine available microbiome visits
+
+Count the number of microbiome samples available at each visit.
+
+```{r visit_counts}
+visit_counts <- micro_meta %>%
+  count(
+    VisitID,
+    sort = TRUE,
+    name = "n_samples"
+  )
+
+visit_counts
+```
+
+Also examine the numeric visit number where available.
+
+```{r visit_number_counts}
+micro_meta %>%
+  filter(!is.na(VisitNumber)) %>%
+  count(
+    VisitNumber,
+    sort = TRUE,
+    name = "n_samples"
+  )
+```
+
+---
+
+# Step 5: Examine available subject-level variables
+
+```{r inspect_subject_variables}
+micro_meta %>%
+  select(
+    SubjectID,
+    study,
+    race,
+    sex,
+    age,
+    bmi,
+    sspg,
+    ir_is_classification
+  ) %>%
+  distinct(SubjectID, .keep_all = TRUE) %>%
+  head(20)
+```
+
+Check the number of subjects by insulin resistance classification:
+
+```{r ir_is_counts}
+micro_meta %>%
+  distinct(SubjectID, .keep_all = TRUE) %>%
+  count(
+    ir_is_classification,
+    name = "n_subjects"
+  )
+```
+
+---
+
+# Step 6: Check whether a T2D variable is currently available
+
+The currently downloaded 16S metadata contains insulin resistance information,
+but an explicit T2D diagnosis variable has not yet been identified.
+
+```{r check_t2d_variables}
+grep(
+  pattern = "t2d|diabet|glucose|hba1c",
+  x = names(micro_meta),
+  value = TRUE,
+  ignore.case = TRUE
+)
+```
+
+If this returns:
+
+```text
+character(0)
+```
+
+then the current microbiome metadata does not contain an explicit T2D,
+diabetes, glucose, or HbA1c variable.
+
+---
+
+# Step 7: Check participants available at Visit 01
+
+Visit 01 is a possible candidate for the single-timepoint analysis.
+We will not finalize this choice until we inspect the matching iPOP
+metabolomics data.
+
+```{r visit01}
+micro_visit01 <- micro_meta %>%
+  filter(VisitID == "01")
+
+dim(micro_visit01)
+
+n_distinct(micro_visit01$SubjectID)
+
+micro_visit01 %>%
+  select(
+    SampleID,
+    SubjectID,
+    VisitID,
+    age,
+    sex,
+    bmi,
+    sspg,
+    ir_is_classification
+  ) %>%
+  head(20)
+```
+
+---
+
+# Step 8: Load baseline TMAO data and match with 16S microbiome
+
+For the metabolomics data, `E11` is treated as the first available
+metabolomics visit. For the microbiome data, Visit `01` is treated as the
+first available microbiome visit.
+
+The two datasets will be matched using the participant-level `SubjectID`.
+
+## 8.1 Load baseline TMAO data
+
+```{r load_baseline_tmao}
+
+tmao_baseline <- read_csv(
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_TMAO_baseline_E11.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# Inspect
+dim(tmao_baseline)
+head(tmao_baseline)
+
+# Confirm one row per participant
+tmao_baseline %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID)
+  )
+```
+
+## 8.2 Attach full subject metadata to E11 TMAO data
+
+The full iPOP subject metadata are joined to the E11 TMAO dataset using
+SubjectID. This allows the TMAO dataset to be analyzed independently of
+microbiome availability.
+
+```{r attach_metadata_to_tmao}
+
+# Load the full iPOP subject-level metadata
+subject_env <- new.env()
+
+load(
+  file.path(
+    project_dir,
+    "output",
+    "Micro_abundance.RData"
+  ),
+  envir = subject_env
+)
+
+subject_meta <- subject_env$metadata %>%
+  rename(
+    SubjectID = subject_id
+  )
+
+# Check full subject metadata
+dim(subject_meta)
+head(subject_meta)
+
+subject_meta %>%
+  count(
+    ir_is_classification
+  )
+```
+
+The full metadata contain subject-level characteristics including age, sex,
+race, BMI, SSPG, and IR/IS classification.
+
+```{r join_tmao_metadata}
+
+tmao_E11_metadata <- tmao_baseline %>%
+
+  left_join(
+    subject_meta %>%
+      select(
+        SubjectID,
+        study,
+        race,
+        sex,
+        age,
+        bmi,
+        sspg,
+        ir_is_classification
+      ),
+    by = "SubjectID"
+  )
+
+# Inspect
+dim(tmao_E11_metadata)
+
+tmao_E11_metadata %>%
+  select(
+    SubjectID,
+    MetabSampleID,
+    MetabVisitID,
+    TMAO_raw,
+    TMAO_log2,
+    age,
+    sex,
+    bmi,
+    sspg,
+    ir_is_classification
+  ) %>%
+  head(20)
+```
+
+## 8.3 Check TMAO metadata completeness
+
+```{r check_tmao_metadata}
+
+tmao_E11_metadata %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID),
+
+    n_missing_TMAO =
+      sum(is.na(TMAO_log2)),
+
+    n_missing_age =
+      sum(is.na(age)),
+
+    n_missing_sex =
+      sum(is.na(sex)),
+
+    n_missing_bmi =
+      sum(is.na(bmi)),
+
+    n_missing_sspg =
+      sum(is.na(sspg)),
+
+    n_missing_IRIS =
+      sum(is.na(ir_is_classification))
+  )
+
+# See IR / IS / Unknown distribution
+tmao_E11_metadata %>%
+  count(
+    ir_is_classification
+  )
+```
+
+## 8.4 Save E11 TMAO dataset with metadata
+
+Keep all E11 TMAO participants at this stage, including participants with
+Unknown IR/IS status. Analysis-specific exclusions will be made later.
+
+```{r save_tmao_with_metadata}
+
+write_csv(
+  tmao_E11_metadata,
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_TMAO_E11_with_metadata.csv"
+  )
+)
+```
+
+## 8.5 Check overlap between microbiome Visit 01 and metabolomics E11
+
+```{r check_microbiome_metabolomics_overlap}
+
+micro_visit01_subjects <- micro_visit01 %>%
+  distinct(SubjectID) %>%
+  pull(SubjectID)
+
+tmao_E11_subjects <- tmao_baseline %>%
+  distinct(SubjectID) %>%
+  pull(SubjectID)
+
+# Number of participants in each dataset
+length(micro_visit01_subjects)
+length(tmao_E11_subjects)
+
+# Number of participants present in both datasets
+length(
+  intersect(
+    micro_visit01_subjects,
+    tmao_E11_subjects
+  )
+)
+
+# IDs present in both datasets
+intersect(
+  micro_visit01_subjects,
+  tmao_E11_subjects
+)
+```
+
+## 8.6 Merge Visit 01 microbiome metadata with baseline TMAO
+
+```{r merge_microbiome_tmao}
+
+micro_tmao_matched <- micro_visit01 %>%
+
+  # Rename microbiome visit variable for clarity
+  rename(
+    MicrobiomeSampleID = SampleID,
+    MicrobiomeVisitID = VisitID
+  ) %>%
+
+  # Keep participants present in both datasets
+  inner_join(
+    tmao_baseline,
+    by = "SubjectID"
+  )
+
+# Inspect final matched sample size
+micro_tmao_matched %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID)
+  )
+
+# Inspect selected variables
+micro_tmao_matched %>%
+  select(
+    SubjectID,
+    MicrobiomeSampleID,
+    MicrobiomeVisitID,
+    MetabSampleID,
+    MetabVisitID,
+    TMAO_raw,
+    TMAO_log2,
+    age,
+    sex,
+    race,
+    bmi,
+    sspg,
+    ir_is_classification
+  ) %>%
+  head(20)
+```
+
+## 8.7 Check participants that did not match
+
+```{r check_unmatched_subjects}
+
+# Visit 01 microbiome participants without E11 metabolomics
+micro_without_tmao <- micro_visit01 %>%
+  anti_join(
+    tmao_baseline,
+    by = "SubjectID"
+  )
+
+# E11 metabolomics participants without Visit 01 microbiome
+tmao_without_micro <- tmao_baseline %>%
+  anti_join(
+    micro_visit01,
+    by = "SubjectID"
+  )
+
+nrow(micro_without_tmao)
+nrow(tmao_without_micro)
+
+micro_without_tmao %>%
+  select(SubjectID, SampleID) %>%
+  head(20)
+
+tmao_without_micro %>%
+  select(SubjectID, MetabSampleID) %>%
+  head(20)
+```
+
+
+## 8.8 Remove participants without IR/IS classification
+
+Participants with unknown or missing insulin resistance classification are
+excluded from the final analytic dataset.
+
+```{r filter_ir_is}
+
+# Check classification before filtering
+micro_tmao_matched %>%
+  count(ir_is_classification)
+
+# Keep only participants classified as IR or IS
+micro_tmao_final <- micro_tmao_matched %>%
+  filter(
+    ir_is_classification %in% c("IR", "IS")
+  )
+
+# Check final sample size
+micro_tmao_final %>%
+  summarise(
+    n_samples = n(),
+    n_subjects = n_distinct(SubjectID)
+  )
+
+# Check IR/IS distribution after filtering
+micro_tmao_final %>%
+  count(
+    ir_is_classification,
+    name = "n_subjects"
+  )
+```
+
+## 8.9 Subset the phyloseq object to the final matched participants
+
+```{r subset_phyloseq_final}
+
+matched_microbiome_ids <- micro_tmao_final$MicrobiomeSampleID
+
+ps_micro_tmao_final <- prune_samples(
+  sample_names(ps_16s) %in% matched_microbiome_ids,
+  ps_16s
+)
+
+# Check final phyloseq object
+ps_micro_tmao_final
+
+nsamples(ps_micro_tmao_final)
+ntaxa(ps_micro_tmao_final)
+
+# Confirm that all final microbiome IDs are present
+length(
+  intersect(
+    matched_microbiome_ids,
+    sample_names(ps_micro_tmao_final)
+  )
+)
+
+# Should return character(0)
+setdiff(
+  matched_microbiome_ids,
+  sample_names(ps_micro_tmao_final)
+)
+```
+
+
+## 9 Save final matched microbiome-TMAO dataset
+
+```{r save_final_microbiome_tmao}
+
+# Save final participant-level metadata
+write_csv(
+  micro_tmao_final,
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_16S_visit01_TMAO_E11_IRIS_final_metadata.csv"
+  )
+)
+
+# Save corresponding genus-level phyloseq object
+saveRDS(
+  ps_micro_tmao_final,
+  file.path(
+    project_dir,
+    "output",
+    "iPOP_16S_visit01_TMAO_E11_IRIS_final_phyloseq.rds"
+  )
+)
+```
+
+
