@@ -258,7 +258,7 @@ ggplot(genus_means, aes(x = ir_is_classification, y = mean_abund, fill = Taxon))
   theme_minimal() +
   theme(legend.key.size = unit(0.3, "cm"),
         legend.text = element_text(size=6))
-```
+ggsave("overall_mean_abundance_genera.png", width = 10, height = 8, dpi = 300)
 ```
 
 First, making ps of just the top 
@@ -283,8 +283,7 @@ ggplot(twenty_means, aes(x = ir_is_classification, y = mean_abund, fill = Taxon)
   theme_minimal() +
   theme(legend.key.size = unit(0.3, "cm"),
         legend.text = element_text(size=6))
-
-
+ggsave("top20_genera_mean_abundance.png", width = 10, height = 8, dpi = 300)
 ```
 
 same for pilot
@@ -323,6 +322,7 @@ genus_means %>%
   theme_minimal() +
   theme(legend.key.size = unit(0.3, "cm"),
         legend.text = element_text(size=6))
+ggsave("clostridium_mean_abundance_genera.png", width = 10, height = 8, dpi = 300)
 ```
 
 
@@ -376,31 +376,5 @@ pilot_alpha <- data.frame(
 head(pilot_alpha)
 ```
 We calculated alpha diversity metrics! note to self to amend this to pilot_df.
-
-```{r}
-# Subset Clostridium only
-clos_ps <- subset_taxa(pilot_ps, Taxon %in% c(
-  "Clostridium.IV", "Clostridium.XI", "Clostridium.XIVa", 
-  "Clostridium.XIVb", "Clostridium.XVIII", "Clostridium.sensu_stricto", "unclassified_Clostridiales", "unclassified_Clostridiales_Incertae.Sedis.XIII" 
-))
-
-# Relative abundance within Clostridium
-clos_rel <- transform_sample_counts(clos_ps, function(x) x/sum(x))
-```
-
-
-```{r}
-# Stacked bar
-plot_bar(clos_rel, x = "ir_is_classification", fill = "Taxon")
-```
-
-
-```{r}
-# Box plot of each cluster by group
-clos_melt <- psmelt(clos_rel)
-ggplot(clos_melt, aes(x = ir_is_classification, y = Abundance, fill = Taxon)) +
-  geom_boxplot() +
-  facet_wrap(~Taxon)
-```
 
 
