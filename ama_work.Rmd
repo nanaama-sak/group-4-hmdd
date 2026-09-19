@@ -4,29 +4,10 @@ output: html_document
 date: "2026-09-19"
 ---
 
----
-title: "miles_rep_1"
-author: "nanaama-sak"
-date: "2026-09-18"
-output: html_document
-editor_options: 
-  markdown: 
-    wrap: 72
----
+# Group 4 exploration
 
-# MILES Study Replication
-
-## Question: Is the positive association between butyrate-producers in
-
-the gut microbiome and insulin homeostasis (here, insulin sensitivty)
-consistent across datasets? This is replication of the analysis done by
-The Microbiome and Insulin Longitudinal Evaluation Study
-[<https://pmc.ncbi.nlm.nih.gov/articles/PMC9630078/>]
-
-## Dataset: Integrated Personal Omics Profiling (iPOP)! The original
-
-paper ran on the (unavailable) iHMP/HMP2 (integrative Human Microbiome
-Project/Human Microbiome Project 2)
+## Question: TMAO-associated microbial signatures associated with insulin status?
+## Dataset: Integrated Personal Omics Profiling (iPOP)!
 
 ### Set-up
 
@@ -59,13 +40,6 @@ sample_variables(ps) #these are the metadata columns we can group by
 ```
 
 ### Data check
-*Is our data similar enough to the MILES dataset (HMP)?*
-1. Do we have a gut microbiome measurement and insulin phenotype on the same participants? 
-
-2. do we have the same genera as MILES HMP? 
-
-3. Do we have enough independent observations (enough participants at a given
-timepoint)
 
 ```{r datacheck}
 nsamples(ps) #855 samples
@@ -85,28 +59,24 @@ sample_variables(ps) #ir_is_classification is what its called.
 #is it on the same pts?
 table(sample_data(ps)$ir_is_classification)
 
+
 #ir_is_classification is in sample data, so it will correspond with abundance table. 
 ```
 
 Yes! Insulin phenotypes are known per pt. Note that 192 individuals have unknown classification... so will likely filter these out? Later?
 
-*Do we have the same genera studied in MILES?*
-
 ```{r datacheck3}
-#MILES looks at alistipes, anaerostipes, copracoccus, flavonifractor, odoribacter, oscillibacter, pseudoflavonifracto
-
-hmp_genera <- taxonomy$Taxon[taxonomy$Rank == "Genus"]
-hmp_genera
-miles_genera <- c("Alistipes", "Anaerostipes", "Coprococcus", "Flavonifractor", "Odoribacter", "Oscillibacter", "Pseudoflavonifractor") #lookuptable?? for miles genera?
-miles_genera
-
-generacheck <- data.frame(Genus = miles_genera, in_hmp = miles_genera %in% hmp_genera)
-
-generacheck #so we have all EXCEPT anaerostipes 
+# #MILES looks at alistipes, anaerostipes, copracoccus, flavonifractor, odoribacter, oscillibacter, pseudoflavonifracto
+# 
+# hmp_genera <- taxonomy$Taxon[taxonomy$Rank == "Genus"]
+# hmp_genera
+# miles_genera <- c("Alistipes", "Anaerostipes", "Coprococcus", "Flavonifractor", "Odoribacter", "Oscillibacter", "Pseudoflavonifractor") #lookuptable?? for miles genera?
+# miles_genera
+# 
+# generacheck <- data.frame(Genus = miles_genera, in_hmp = miles_genera %in% hmp_genera)
+# 
+# generacheck #so we have all EXCEPT anaerostipes 
 ```
-
-SO! We have 6 of the 7 relevant genera studied. I feel this is fine.
-Onward we push.
 
 *Do we have enough independent observations?*
 
@@ -159,15 +129,15 @@ ntaxa(irisv1genera) #45 genera
 as.data.frame(tax_table(irisv1genera))
 ```
 
-#### sidequest filter to those w/ serum metabolome data
+IGNORE: sidequest filter to those w/ serum metabolome data
 ```{r}
-pilot_ps <- subset_samples(irisv1genera, SubjectID %in% c("ZK112BX", "ZLZQMEV", "ZM7JY3G", "ZPF36E2", "ZTJ7L7Z", "ZUPAQVU", "ZVBQY1N", "ZVM4N7A", "ZW61YGW", "ZWCZHHY", "ZWFDEY0", "ZY7IW45", "K4CK8Y", "ZKFV71L", "ZLZNCLZ", "ZN3TBJM", "ZN9YTFN", "ZPMBHPS"))
-
-# pilot_ps2 <- subset_samples(irisv1genera, SubjectID %in% c("ZN9YTFN-01", "ZN3TBJM-01", "ZM7JY3G-01", "ZLZQMEV-01", "ZLZNCLZ-01", "ZY7IW45-01", "ZWFDEY0-01", "ZWCZHHY-01", "ZW61YGW-01", "ZVM4N7A-01", "ZVBQY1N-01", "ZUPAQVU-01", "ZTJ7L7Z-01", "ZPMBHPS-01", "ZPF36E2-01", "ZKFV71L-01", "ZK4CK8Y-01", "ZK112BX-01"))
-
-nsamples(pilot_ps) 
-
-head(as.data.frame(tax_table(pilot_ps)))
+# pilot_ps <- subset_samples(irisv1genera, SubjectID %in% c("ZK112BX", "ZLZQMEV", "ZM7JY3G", "ZPF36E2", "ZTJ7L7Z", "ZUPAQVU", "ZVBQY1N", "ZVM4N7A", "ZW61YGW", "ZWCZHHY", "ZWFDEY0", "ZY7IW45", "K4CK8Y", "ZKFV71L", "ZLZNCLZ", "ZN3TBJM", "ZN9YTFN", "ZPMBHPS"))
+# 
+# # pilot_ps2 <- subset_samples(irisv1genera, SubjectID %in% c("ZN9YTFN-01", "ZN3TBJM-01", "ZM7JY3G-01", "ZLZQMEV-01", "ZLZNCLZ-01", "ZY7IW45-01", "ZWFDEY0-01", "ZWCZHHY-01", "ZW61YGW-01", "ZVM4N7A-01", "ZVBQY1N-01", "ZUPAQVU-01", "ZTJ7L7Z-01", "ZPMBHPS-01", "ZPF36E2-01", "ZKFV71L-01", "ZK4CK8Y-01", "ZK112BX-01"))
+# 
+# nsamples(pilot_ps) 
+# 
+# head(as.data.frame(tax_table(pilot_ps)))
 ```
 
 
@@ -200,19 +170,18 @@ miles_df <- psmelt(miles_ps_rel)
 dim(miles_df) #44 samples x 45 genera = 1980 rows
 miles_df
 ```
-
-doing the same with pilot ps
+IGNORE: doing the same with pilot ps
 ```{r}
-pilot_ps_rel <- transform_sample_counts(pilot_ps, function(x) x / sum(x)) #this normalizes our ps
-all(abs(sample_sums(pilot_ps_rel) -1) < 1e-9) #every sample is 1 = true!
-
-#melting into a df
-
-pilot_df <- psmelt(pilot_ps_rel)
-dim(pilot_df) #17 samples x 45 genera = 765 rows
-pilot_df
-
-any(pilot_df$sspg == 0) #sspg is steady state glucose reading... this helps us make glucose a continuous variable
+# pilot_ps_rel <- transform_sample_counts(pilot_ps, function(x) x / sum(x)) #this normalizes our ps
+# all(abs(sample_sums(pilot_ps_rel) -1) < 1e-9) #every sample is 1 = true!
+# 
+# #melting into a df
+# 
+# pilot_df <- psmelt(pilot_ps_rel)
+# dim(pilot_df) #17 samples x 45 genera = 765 rows
+# pilot_df
+# 
+# any(pilot_df$sspg == 0) #sspg is steady state glucose reading... this helps us make glucose a continuous variable
 ```
 
 #### Genera profile within group
@@ -239,7 +208,12 @@ microshades attempt??
 ```{r}
 remotes::install_github("mikemc/speedyseq")
 mdf_prep <- prep_mdf(irisvisit01)
-head(as.data.frame(tax_table(irisvisit01)))
+
+irisv1_df
+
+irisv1_df <- as.data.frame(tax_table(irisvisit01))
+irisv1_df <- irisv1_df |>
+  pivot_wider()
 
 ```
 
@@ -332,6 +306,9 @@ genus_means |>
   slice_max(mean_abund, n = 45) |> #showing top 5 genera per group
   mutate(percent = round(100* mean_abund, 1)) |>
   select(ir_is_classification, Taxon, percent)
+
+as.data.frame(genus_means)
+write.csv(genus_means, "genus_means", row.names = FALSE)
 ```
 Bacteroides most abundant (39.7%, followed by Faecalibacterium & Lachnospiracea) --  IN ALL pts
 
