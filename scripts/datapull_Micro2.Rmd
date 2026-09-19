@@ -1,0 +1,359 @@
+---
+title: "Tutorial 2: Inspecting data and creating a phyloseq object"
+author: "Written by: Keisha Harrison"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: yes
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, error = TRUE)
+
+# Start from a clean environment, then pick up the objects saved by Tutorial 1
+rm(list = ls())
+```
+
+# Background
+
+A **phyloseq object** is a container that keeps all the pieces of a microbiome study locked together, so that when you filter or subset one piece, the others follow automatically. Drop a sample from the abundance table and its metadata row goes with it; there's no way for the pieces to drift out of sync.
+
+A phyloseq object may include:
+
+- abundance table (counts or relative abundance)
+- sample data (metadata)
+- taxonomy table (rank + taxon name), in this instance parsed from the rank-prefixed abundance columns
+- phylogenetic tree, not in our current dataset
+- reference sequences, not in our current dataset
+
+# Tutorial overview
+
+In Tutorial 2 we will:
+
+- Explore the structure of each table
+- See why the two tables can't be merged as they stand: they identify their rows differently, one by **SampleID** and one by **SubjectID**, and they describe different things (one row per *sample* vs. one row per *participant*)
+- Parse `SampleID` into its component pieces so the tables can be joined
+- Build a `phyloseq` object (OTU table, sample metadata, and taxonomy table), the standard data container for microbiome analysis in R, and save it for Tutorial 3
+
+---
+
+# Step 1: Set up the working environment
+
+## 1.1 Load required libraries
+
+```{r load_lib}
+library(dplyr)     # data manipulation: joins, filtering, summarizing
+library(tidyr)     # reshaping data: splitting and pivoting columns
+library(phyloseq)  # the microbiome data container and its tools
+library(tibble)    # modern data frames; we use it for column_to_rownames()
+```
+
+**Where each function in this tutorial comes from:**
+
+| Package | Functions used in Tutorial 2 |
+|---|---|
+| `dplyr` | `left_join()`, `mutate()`, `summarise()`, `distinct()`, `n_distinct()` |
+| `tidyr` | `separate()` |
+| `tibble` | `column_to_rownames()` |
+| `phyloseq` | `otu_table()`, `tax_table()`, `sample_data()`, `phyloseq()`, `subset_taxa()`, `nsamples()`, `ntaxa()`, `sample_names()`, `rank_names()` |
+
+## 1.2 Load the objects saved in Tutorial 1
+
+`load()` reads an `.RData` file and loads the saved objects (here, `abundance` and `metadata` from Tutorial 1) directly into your workspace.
+
+```{r load_data}
+# Bring the `abundance` and `metadata` tibbles back into the session from Tutorial 1
+load("output/Micro_abundance.RData", verbose = TRUE) #verbose is set to 'TRUE' to display loaded objects
+```
+
+> If this errors with *"cannot open file"*, make sure your working directory is the folder containing `Micro_abundance.RData`. In RStudio: **Session -> Set Working Directory -> To Source File Location**.
+
+---
+
+# Step 2: Exploratory data analysis
+
+Before building the phyloseq object, we want a clear picture of what is in each table: its size, its structure, and the meaning of its identifiers.
+
+## 2.1 Inspect the abundance table
+
+```{r eda_abundance}
+dim(abundance)          # rows x columns (855 x 97)
+class(abundance)        # what type of object is it? (tibble, data frame)
+colnames(abundance)     # column names (taxa + ID column)
+n_distinct(abundance)   # number of distinct rows (expect 855, one per sample)
+head(abundance)         # first few rows
+```
+
+The abundance table has one row per **sample**, with the `SampleID` column identifying each sample.
+
+```{r sample_ids}
+length(unique(abundance$SampleID))   # how many unique sample IDs? 855
+head(abundance$SampleID, 20)         # look at a few examples
+
+# Each of the 5 taxonomic ranks should sum to ~1 per sample, so a row total of
+# ~5 is expected. In practice the totals run from about 2.0 to 5.0: reads that
+# could not be classified at a given rank simply aren't represented there, so
+# the finer ranks (family, genus) fall short of 1.
+summary(rowSums(abundance[, -1], na.rm = TRUE))
+```
+
+**Question.** What pattern do you notice in the `SampleID` strings? (Answer: each one is a subject identifier and a visit identifier glued together with a dash. iPOP, which stands for Integrative Personal Omics Profiling, is a *longitudinal* study, meaning the same participants were sampled repeatedly over time. So one person contributes many samples, and the ID has to record both who and when.)
+
+## 2.2 Inspect the metadata table
+
+```{r eda_metadata}
+dim(metadata)                      # rows x columns (107 x 8)
+class(metadata)                    # object type (tibble, data frame)
+colnames(metadata)                 # list every metadata column name
+n_distinct(metadata)               # number of distinct rows (expect 107)
+n_distinct(metadata$subject_id)    # number of distinct SUBJECTS (expect 107) to look for potential duplicates
+head(metadata)                     # first few rows
+```
+
+> Checking `n_distinct(metadata$subject_id)` alongside `n_distinct(metadata)` is the more meaningful test: it confirms `subject_id` is unique, i.e. that this really is one row per participant. Two identical counts (107 and 107) tell us there are no duplicated subjects.
+
+**Questions.**
+
+(i) What identifier does the metadata table use?
+(ii) How does it compare to `SampleID` in the abundance table?
+
+**Key observation:** the two tables are at different levels of resolution.
+
+- `metadata` is **subject-level**, one row per participant (107 subjects)
+- `abundance` is **sample-level**, multiple rows per participant (one per visit; 855 samples from 96 subjects)
+
+Because of that mismatch, we can't merge them directly. We first need to extract the subject portion of `SampleID`.
+
+---
+
+# Step 3: Parse SampleID into SubjectID + VisitID
+
+`SampleID` has the form `SubjectID-VisitID` (e.g., `ZOZOW1T-1010` is a sample from subject `ZOZOW1T` at visit `1010`, and `ZNQOVZV-01` is subject `ZNQOVZV` at visit `01`). We want to split it into two columns so the abundance table can be joined to the metadata table by subject.
+
+## 3.1 Separate SampleID
+
+We use `tidyr::separate()` to split the column on the dash (`-`). A few argument notes:
+
+- `into = c("SubjectID", "VisitID")`, names for the two new columns we create from `SampleID`
+- `sep = "-"`, split on the dash character
+- `remove = FALSE`, keep the original `SampleID` column instead of dropping it
+- `extra = "merge"`, if there are *more* than two pieces (e.g., `ZOZOW1T-1022-1`), glue the extras onto the last column instead of erroring
+- `fill = "right"`, if there are *fewer* than two pieces, fill missing pieces with `NA` on the right
+
+We also extract the leading digits of `VisitID` using a regular expression (regex). The pattern is `^([0-9]+).*`:
+
+- `^` anchors the match to the **beginning** of the string
+- `[0-9]` matches any single **digit**
+- `+` means "one or more of the thing immediately before it", so `[0-9]+` is a run of digits
+- `.` is the wildcard, matching any single character
+- `*` means "zero or more of the thing immediately before it", so `.*` is the rest of the string
+- `( )` **captures** what's inside so we can refer back to it as `\\1` in the replacement
+
+Put together: keep the leading run of digits, throw away everything after it. Expect a `NAs introduced by coercion` warning when the chunk runs: four samples carry letter-coded visit IDs (`E11`, `E11-1A`, `E11-2`, `E11-3`) that have no leading digits, so `VisitNumber` is `NA` for those four. That is why Tutorial 3 counts visits with `VisitID` rather than `VisitNumber`.
+
+```{r parse_id}
+# Note the object name: this table is derived from `abundance`, not from
+# `metadata`. Keeping "abundance" in the name makes the join in 3.2 easier to
+# follow, since we'll be merging `abundance_ids` with `metadata`.
+abundance_ids <- data.frame(SampleID = abundance$SampleID) |>
+  separate(
+    SampleID,
+    into   = c("SubjectID", "VisitID"),
+    sep    = "-",
+    remove = FALSE,
+    extra  = "merge",
+    fill   = "right"
+  ) |>
+  # Pull just the leading digits out of VisitID as an integer
+  # (e.g., "01" -> 1, "04_2" -> 4).
+  mutate(VisitNumber = as.integer(sub("^([0-9]+).*", "\\1", VisitID)))
+
+head(abundance_ids)   # confirm that the SubjectID / VisitID / VisitNumber separation looks right
+```
+
+`SampleID` is already unique in `abundance`, so there is no need for a `distinct()` call here. Rather than assume it, let's verify that `SubjectID` + `VisitID` together form a primary key:
+
+```{r check_primary_key}
+nrow(abundance_ids)                                      # 855
+n_distinct(abundance_ids$SampleID)                       # 855
+abundance_ids |> distinct(SubjectID, VisitID) |> nrow()  # 855 -> the pair is unique
+```
+
+## 3.2 Join the parsed identifiers to the subject metadata
+
+Now that we have a `SubjectID` column on the sample side, we can use a **left join** function to attach each sample's subject-level metadata.
+
+**How does 'left_join' work?**
+A `left_join(x, y, by = ...)` keeps every row from `x` (the left table) and pulls in (i.e., joins) columns from `y` based on matching values in the merging column(s) specified in the `by` argument. Rows in `x` with no match in `y` get `NA` for the joined columns; those would be samples whose subject doesn't appear in `metadata`.
+
+```{r join_meta}
+# Attach subject metadata to each sample by matching SubjectID to subject_id
+sample_metadata <- abundance_ids |>
+  left_join(metadata, by = c("SubjectID" = "subject_id"))
+
+head(sample_metadata)   # inspect the joined table
+
+# How many samples failed to find a matching subject? (expect 0)
+sample_metadata |>
+  summarise(n_missing_subject_meta = sum(is.na(study)))
+
+colnames(sample_metadata)   # all columns now available (sample + subject fields)
+dim(sample_metadata)        # 855 samples x 11 columns
+
+n_distinct(abundance_ids$SubjectID)   # 96 subjects were actually sequenced
+n_distinct(metadata$subject_id)       # 107 subjects are described in the metadata
+```
+
+> Note the asymmetry: the metadata table describes 107 enrolled subjects, but only 96 of them have 16S samples in the abundance table. Every sequenced subject *does* find a match (0 missing), so the left join loses nothing, the 11 extra subjects simply have no samples to attach to.
+
+---
+
+# Step 4: Build a phyloseq object
+
+`phyloseq` bundles together the different data tables of a microbiome study (counts, sample metadata, taxonomy, phylogeny) into a single object you can subset, transform, and plot as one unit. We'll build three pieces and snap them together: an OTU table (the abundances), a sample metadata table, and a taxonomy table (including the rank labels). Having the taxonomy table is what lets us pick a single taxonomic level with `phyloseq::subset_taxa()` and then agglomerate, normalize, and melt it.
+
+## 4.1 Build the OTU table
+
+`phyloseq` expects the OTU/ASV feature matrix as a numeric matrix with taxa as **rows** and samples as **columns** (the transpose of what `abundance` currently is).
+
+One important detail about this particular table: its columns report relative abundances at *five* taxonomic ranks at once (phylum, class, order, family, genus), each prefixed with its rank (e.g. `genus_Bacteroides`, `phylum_Bacteroidetes`). These ranks are **not** a linked lineage; each rank is its own independent set of columns that should sum to ~1 per sample. We keep **all** of them here so we can choose any rank later, and we record which rank each feature belongs to in the taxonomy table (Section 4.2).
+
+> **First row-names step-down.** `abundance` is a tibble, and tibbles don't carry row names. `phyloseq` identifies samples *by* row name, so the ID has to move out of its column and into the row names before we go any further. `tibble::column_to_rownames()` is the function for exactly that: you hand it a tibble and it hands back a base `data.frame` with row names set. This is the first of the two conversions promised in Tutorial 1; the second is in 4.3.
+
+```{r otu_table}
+# tibble::column_to_rownames() moves the SampleID column into the row names.
+# Note what it returns: a base data.frame, NOT a tibble, because tibbles cannot
+# hold row names. That step-down is the whole point of calling it here.
+# base::as.matrix() then drops the data-frame wrapper, and base::t() transposes
+# so taxa are rows and samples are columns, which is what phyloseq expects.
+# This one chain replaces a longer sequence of assigning rownames and deleting
+# the ID column by hand.
+otu_mat <- abundance |>
+  tibble::column_to_rownames(var = "SampleID") |>
+  as.matrix() |>
+  t()
+
+dim(otu_mat)   # 96 taxa x 855 samples
+
+# Wrap in a phyloseq OTU table (declaring that taxa are in rows, not columns).
+# NOTE: we keep ALL features, spanning five ranks. Because each rank already
+# sums to ~1 per sample, the full table sums to ~5 per sample. That's expected:
+# we subset to a SINGLE rank and re-normalize before any analysis (Tutorial 3),
+# so we never mix ranks in one calculation.
+otu_ps <- otu_table(otu_mat, taxa_are_rows = TRUE)
+```
+
+## 4.2 Build the taxonomy table
+
+A taxonomy table tells `phyloseq` what rank each taxon sits at and what its name is. Here each feature name encodes exactly those two things: its **rank** (the prefix before the first `_`) and its **taxon name** (everything after). We split them into a two-column taxonomy table, `Rank` and `Taxon`, so phyloseq can tell the ranks apart and we can subset to any one level later.
+
+```{r tax_table}
+# The taxonomy table is a matrix: one row per taxon, one column per rank field.
+# Its rownames must match the taxa (rownames) of the OTU table exactly, so we
+# reuse rownames(otu_mat) as the keys.
+taxa_ids <- rownames(otu_mat)
+
+rank_label <- sub("_.*", "", taxa_ids)        # "genus_Bacteroides" -> "genus"
+taxon_name <- sub("^[^_]+_", "", taxa_ids)    # "genus_Bacteroides" -> "Bacteroides"
+
+# Capitalize the rank so it reads like a standard taxonomy column
+# ("genus" -> "Genus").
+rank_label <- tools::toTitleCase(rank_label)
+
+# Two columns: Rank (Phylum/Class/Order/Family/Genus) and the cleaned Taxon name
+tax_mat <- cbind(Rank = rank_label, Taxon = taxon_name)
+rownames(tax_mat) <- taxa_ids
+
+# Wrap it in a phyloseq taxonomy table
+tax_ps <- phyloseq::tax_table(tax_mat)
+
+head(tax_mat)              # taxon key on the left, Rank + Taxon labels on the right
+table(tax_mat[, "Rank"])   # how many features sit at each rank
+```
+
+## 4.3 Build the sample data table
+
+`phyloseq` matches the sample-data rows to the OTU-table columns by **row name**, so the rownames here must equal the column names of `otu_mat`.
+
+> **Second row-names step-down.** Same reason as 4.1, different route. Here we're assigning row names directly with `rownames() <-`, so we call `as.data.frame()` first to be sure we're working on a base data frame. Try deleting that line and rerunning the chunk: on current versions of `tibble` you'll get a `Setting row names on a tibble is deprecated` warning, and on older ones the row names quietly fail to stick, which leaves `phyloseq::sample_data()` with nothing to match samples on.
+
+```{r sample_data}
+# We verified in 3.1 that SampleID is unique, so no de-duplication is needed here.
+# as.data.frame() steps down from tibble to base data.frame so the rownames
+# assignment on the next line is supported (tibbles don't carry row names).
+sample_df <- as.data.frame(sample_metadata)
+
+# Set rownames to SampleID, phyloseq matches samples by these
+rownames(sample_df) <- sample_df$SampleID
+
+# Wrap in a phyloseq sample_data object
+sdata <- phyloseq::sample_data(sample_df)
+```
+
+## 4.4 Assemble the phyloseq object
+
+```{r build_ps}
+# Sanity check: phyloseq silently drops samples that don't appear in BOTH the
+# OTU table and the sample data, so confirm the two sets of names match exactly
+# before assembling.
+stopifnot(setequal(colnames(otu_mat), rownames(sample_df)))
+
+# phyloseq::phyloseq() is the constructor: hand it the pieces in any order and
+# it works out which is which from their classes.
+ps <- phyloseq(otu_ps, sdata, tax_ps)
+ps                        # print the object's summary
+
+# Quick inspection. All four of these come from phyloseq.
+nsamples(ps)              # number of samples (855)
+ntaxa(ps)                 # number of taxa (96, all ranks combined)
+head(sample_names(ps))    # first few sample IDs
+rank_names(ps)            # the taxonomy fields we stored: "Rank" and "Taxon"
+```
+
+## 4.5 Subset by taxonomic level
+
+Because every feature is tagged with its `Rank`, we can pull out a single taxonomic rank on demand with `subset_taxa()`. 
+
+```{r subset_by_rank}
+# See all the levels available to choose from
+table(as.vector(tax_table(ps)[, "Rank"]))
+
+# The genus-level view (45 genera)
+ps_genus <- subset_taxa(ps, Rank == "Genus")
+ps_genus
+
+# Summed relative abundance at genus level per sample; we expect values at or
+# just under 1.
+genus_sums <- sample_sums(ps_genus)   # phyloseq's own per-sample total
+summary(genus_sums)
+
+# 274 of 855 samples come in below 0.95. 
+sum(genus_sums < 0.95)
+```
+
+---
+
+# Step 5: Save the phyloseq object for Tutorial 3
+
+Tutorial 3 begins by `load()`-ing the `phyloseq` object we just built, so we save it here. (Tutorial 3 then agglomerates, normalizes, and melts it, and explores the sample metadata.)
+
+```{r save_ps}
+# Write the assembled phyloseq object into an .RData file for Tutorial 3 to load
+save(ps, file = "output/phyloseq.RData")
+
+# Save sample-level metadata separately as CSV
+# This contains SampleID, SubjectID, VisitID, VisitNumber,
+# age, sex, BMI, SSPG, IR/IS classification, etc.
+readr::write_csv(
+  sample_metadata,
+  "output/iPOP_16S_sample_metadata.csv"
+)
+```
+
+---
+
+**Next:** continue to **Tutorial 3: Agglomerate, normalize, and melt the phyloseq object**.

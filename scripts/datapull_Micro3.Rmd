@@ -1,0 +1,431 @@
+---
+title: "Tutorial 3: Agglomerate, normalize, and melt the phyloseq object"
+author: "Written by: Keisha Harrison"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: yes
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, error = TRUE)
+
+# Start from a clean environment so this tutorial always picks up the object
+# saved by Tutorial 2 rather than leftovers from another session.
+rm(list = ls())
+```
+
+# Background
+
+In Tutorial 2 we built a **phyloseq object**: one container holding the abundance (OTU) table, the sample metadata, and the taxonomy table, with all three kept in sync. Building it was the setup. The payoff is that phyloseq gives us tools for the preprocessing that almost every 16S analysis needs before anything can be plotted or compared.
+
+That preprocessing comes down to three steps, each handled by one phyloseq function:
+
+| Step | phyloseq function | Question it answers | What it does | What you get back |
+|---|---|---|---|---|
+| **Agglomerate** | `tax_glom()` | *What are we counting?* | Sums together every feature that shares the same taxon label at the rank you choose, so each taxon appears exactly once | a phyloseq object |
+| **Normalize** | `transform_sample_counts()` | *On what scale?* | Divides each value by its sample's total, so every sample sums to 1 and samples can be compared directly | a phyloseq object |
+| **Melt** | `psmelt()` | *In what shape?* | Reshapes the object into one long data frame with one row per sample-and-taxon pair, and joins the metadata and taxonomy on as extra columns | a plain data frame |
+
+Pay attention to the last column. **Agglomerate** and **normalize** work *inside* phyloseq: they change the abundance values, and phyloseq keeps the sample data and taxonomy lined up with them. **Melt** takes the data *out* of the container and turns it into an ordinary table, which is the format `ggplot2` and `dplyr` expect. After melting, nothing keeps the pieces in sync, so melt always comes last. If you want to drop samples or taxa, do it before you melt.
+
+# Tutorial overview
+
+In Tutorial 3 we will:
+
+- Load the `phyloseq` object saved in Tutorial 2
+- **Agglomerate** the taxa to a single rank (genus), **normalize** each sample to relative abundance, and **melt** the result into a tidy table, following the same workflow used by [microshades](https://karstenslab.github.io/microshades/articles/microshades-HMP.html)
+- Check along the way that each sample's relative abundances sum to 1
+- Explore the sample metadata: numeric variables, visits per subject, and the insulin-resistant / insulin-sensitive (IR / IS) classification
+
+---
+
+# Step 1: Set up the working environment
+
+## 1.1 Load required libraries
+
+```{r load_lib}
+library(dplyr)     # data manipulation: grouping, counting, summarizing
+library(tidyr)     # reshaping: pivot_longer / pivot_wider
+library(phyloseq)  # the microbiome data container and its tools
+library(ggplot2)   # plotting
+```
+
+**Where each function in this tutorial comes from:**
+
+| Package | Functions used in Tutorial 3 |
+|---|---|
+| `dplyr` | `count()`, `group_by()`, `summarise()`, `arrange()`, `desc()`, `distinct()`, `n_distinct()`, `across()` |
+| `tidyr` | `pivot_longer()`, `pivot_wider()` |
+| `tidyselect` (via `dplyr`/`tidyr`) | `all_of()`, `everything()` |
+| `phyloseq` | `subset_taxa()`, `tax_glom()`, `transform_sample_counts()`, `psmelt()`, `sample_sums()`, `sample_data()`, `tax_table()` |
+| `ggplot2` | `ggplot()`, `aes()`, `geom_col()`, `geom_bar()`, `labs()`, `theme_minimal()`, `theme()`, `element_blank()` |
+| **base R** (nothing to load) | `load()`, `data.frame()`, `dim()`, `nrow()`, `names()`, `head()`, `class()`, `sapply()`, `is.numeric()`, `setdiff()`, `table()`, `summary()`, `all()`, `abs()`, `sum()`, `mean()`, `sd()`, `median()`, `IQR()`, `min()`, `max()`, `reorder()` |
+
+> **A note on `all_of()` and `everything()`.** These are *tidyselect helpers*: small functions that describe **which columns** to work on. You use them inside other functions, not on their own. `all_of(num_vars)` means "the columns named in this character vector, and error if any are missing"; `everything()` means "all columns." They come from the `tidyselect` package, but `dplyr` and `tidyr` both re-export them, so attaching either one is enough. You never need to call `library(tidyselect)`.
+
+## 1.2 Load the phyloseq object from Tutorial 2
+
+`load()` reads the `.RData` file saved at the end of Tutorial 2 and brings the phyloseq object `ps` back into your workspace.
+
+```{r load_data}
+# Bring the phyloseq object `ps` back into the session from Tutorial 2
+load("output/phyloseq.RData")
+
+ps   # print the object's summary to confirm it loaded
+```
+
+> If this errors with *"cannot open file"*, make sure your working directory is the folder containing `tutorial2_objects.RData`. In RStudio: **Session -> Set Working Directory -> To Source File Location**.
+
+---
+
+# Step 2: Agglomerate, normalize, and melt
+
+We now run the three steps from the Background, in the same order the [microshades HMP example](https://karstenslab.github.io/microshades/articles/microshades-HMP.html) uses before plotting. `microshades` does all three in a single `prep_mdf()` call. We run them one at a time so you can see what each one does to the data.
+
+## 2.1 Select the genus rank, then agglomerate
+
+**Agglomerating** means grouping features by their taxonomy at one rank and adding up their abundances. In a typical 16S dataset the features are ASVs, and dozens of ASVs can belong to the same genus. `tax_glom()` merges them into one row per genus, which answers the question *what are we counting?* The answer here is genera, not individual sequence variants.
+
+Our dataset needs one extra step first. The phyloseq object from Tutorial 2 holds features from all five ranks at once, and each one is tagged with a `Rank` column. Mixing ranks would count the same reads several times (once as a phylum, again as a class, and so on). So we first **subset to the genus rank** with `subset_taxa()` and then run `tax_glom()` on what remains. (To analyze a different level, change `"Genus"` to `"Phylum"`, `"Family"`, and so on.)
+
+```{r agglomerate}
+# First, confirm how many features sit at each rank so we know what we're
+# subsetting away (expect Phylum 6, Class 12, Order 12, Family 21, Genus 45).
+tax_table(ps) |> as.data.frame() |> dplyr::count(Rank)
+
+# Keep only the genus-level features (45 genera)
+ps_genus <- subset_taxa(ps, Rank == "Genus")
+
+# tax_glom() merges any taxa that share the same Taxon label and sums their
+# abundances. NArm = FALSE keeps taxa whose label is missing (NA) instead of
+# silently dropping them. None of our labels are missing, but the setting
+# protects you from losing data when you reuse this code on another dataset.
+ps_genus <- tax_glom(ps_genus, taxrank = "Taxon", NArm = FALSE)
+ps_genus
+```
+
+The object still has **45 taxa** after `tax_glom()`, the same as before. That is expected for this dataset: iPOP already summed its reads to the genus level before publishing the table, so every genus appears only once and there is nothing left to merge. With raw ASV data this step would shrink the table a lot. We keep it in so the workflow matches the standard one and works on other datasets without changes.
+
+## 2.2 Check the abundances, then normalize to sum to 1
+
+**Normalizing** puts every sample on the same scale, which answers the question *on what scale?* As Tutorial 1 explained, raw 16S read counts depend on how deeply each sample was sequenced, so two samples can't be compared until each one is converted to proportions. In most workflows, this is the step that turns counts into relative abundances.
+
+Our values are **already relative abundances**, because the iPOP table reports proportions rather than raw read counts. That means each sample's genus-level values should add up to something at or just below 1. Let's check before changing anything:
+
+```{r check_before}
+# One total per sample. Most come in a little UNDER 1 because reads that
+# couldn't be classified down to genus were reported at coarser ranks (phylum,
+# class, ...) and so aren't in our genus-only table.
+summary(sample_sums(ps_genus))
+```
+
+Most samples fall between about 0.94 and 0.99, but a few are much lower (the minimum is close to 0). To put every sample on an identical 0-to-1 scale, we re-normalize: divide each value by its sample's total.
+
+```{r normalize}
+# transform_sample_counts() applies a function to each sample's column of values.
+# Dividing by the sum rescales every sample so its proportions add up to 1.
+ps_rel <- transform_sample_counts(ps_genus, function(x) x / sum(x))
+```
+
+> **What the new numbers mean.** After re-normalizing, a value of 0.30 for *Bacteroides* means "30% of this sample's *genus-classified* reads," not 30% of all reads. For most samples the difference is small. For the few samples where almost nothing was classified to genus, re-normalizing stretches a tiny amount of data up to a full 1, so those samples deserve a second look before you draw conclusions from them.
+
+Because `ps_rel` is still a phyloseq object, the sample data and taxonomy came along unchanged; only the abundance values were rescaled. Now the important check: **does every sample sum to exactly 1?**
+
+```{r check_sum_to_one}
+# all() is TRUE only if EVERY sample passes. We allow a microscopic tolerance
+# (1e-9) because floating-point division is never bit-for-bit exact.
+all(abs(sample_sums(ps_rel) - 1) < 1e-9)   # expect TRUE
+
+# Another way to see it: the min and max sample sum should both be 1.
+summary(sample_sums(ps_rel))
+```
+
+If the first line prints `TRUE`, every sample's genus proportions add up to 1 and we're ready to melt.
+
+## 2.3 Melt into a tidy table
+
+**Melting** changes the *shape* of the data, not its values. Inside phyloseq, the abundances sit in a wide matrix (taxa as rows, samples as columns), with metadata and taxonomy stored in separate tables. `psmelt()` turns all of that into one long data frame:
+
+- one row for every sample-and-genus combination
+- the relative abundance in a column called `Abundance`
+- the sample's metadata (`SubjectID`, `sex`, `ir_is_classification`, ...) and the taxon's labels (`Rank`, `Taxon`) copied onto every row as extra columns
+
+This "long" or "tidy" layout is what `ggplot2` expects. For example, a stacked bar chart of genus composition per sample needs exactly these columns: `Sample` on the x-axis, `Abundance` on the y-axis, and `Taxon` as the fill color.
+
+```{r melt}
+# psmelt() turns the phyloseq object into one long data frame
+mdf <- psmelt(ps_rel)
+
+class(mdf)  # a plain data.frame: we are now OUTSIDE the phyloseq container
+dim(mdf)    # 38,475 rows (855 samples x 45 genera) and 16 columns
+head(mdf)   # psmelt sorts rows by Abundance, largest first
+```
+
+> **Why melt comes last.** `mdf` is an ordinary data frame. If you filter out a sample now, nothing removes that sample from `ps_rel`, and nothing re-normalizes the remaining rows. Keep `ps_rel` for any further work inside phyloseq (subsetting samples, trying a different transformation), and melt again whenever you need a fresh table for plotting.
+
+---
+
+# Step 3: Exploratory analysis of the sample metadata
+
+The sample metadata is also stored in the phyloseq object, so we can pull it back out as a data frame whenever we want to summarize or plot it. Agglomerating and normalizing only changed the abundance values, so `ps`, `ps_genus`, and `ps_rel` all hold the same 855 rows of metadata. We use `ps` here.
+
+## 3.1 Summarize numeric variables
+
+```{r meta_summary}
+# Pull sample metadata out of the phyloseq object as a PLAIN base data.frame.
+# `sample_data()` returns an S4 object, and `as.data.frame()` on it leaves the
+# `sample_data` class attached; some dplyr verbs (`distinct()`, for one) then
+# fail with "Can't reconstruct data frame". Wrapping with the `data.frame()`
+# constructor strips those attributes for good.
+meta <- data.frame(sample_data(ps),
+                   stringsAsFactors = FALSE,
+                   check.names      = FALSE)
+
+class(meta)  # should be exactly "data.frame"
+dim(meta)    # rows (samples) x columns (metadata fields)
+names(meta)  # every metadata column name
+head(meta)   # first few sample rows
+
+# Identify which metadata columns are numeric. Because Tutorial 1 read the
+# metadata header correctly, `age`, `bmi`, and `sspg` arrive as numeric here.
+# (If they show up as character, go back and check the `header = TRUE`
+# argument in Tutorial 1, section 2.2.)
+sapply(meta, class)
+
+# `VisitNumber` is stored as an integer but it is an IDENTIFIER, not a
+# measurement, so averaging it is meaningless. Exclude it from the summary.
+num_vars <- setdiff(names(meta)[sapply(meta, is.numeric)], "VisitNumber")
+num_vars   # expect "age", "bmi", "sspg"
+```
+
+> **Read these numbers carefully.** `meta` is *sample-level* (855 rows), but `age`, `bmi`, and `sspg` are *subject-level* attributes repeated once per visit. A summary across samples therefore weights each participant by how many times they were sampled: a subject with 111 visits counts 111 times as much as a subject with one. Section 3.1.1 shows the subject-level version for comparison.
+
+```{r num_summary}
+# Compute n / mean / sd / median / IQR / min / max for each numeric variable.
+# `across(all_of(num_vars), list(...))` applies every function in the list
+# to every numeric column, producing columns named "{variable}__{stat}".
+num_summary <- meta |>
+  summarise(across(all_of(num_vars), list(
+    n      = ~sum(!is.na(.)),
+    mean   = ~mean(., na.rm = TRUE),
+    sd     = ~sd(., na.rm = TRUE),
+    median = ~median(., na.rm = TRUE),
+    IQR    = ~IQR(., na.rm = TRUE),
+    min    = ~min(., na.rm = TRUE),
+    max    = ~max(., na.rm = TRUE)
+  ), .names = "{.col}__{.fn}"))
+
+# Reshape from wide (one row, many columns) to long (one row per variable x stat),
+# then pivot back to wide so each variable is a row and each stat is a column.
+num_summary_long <- num_summary |>
+  pivot_longer(
+    everything(),
+    names_to  = c("variable", "stat"),
+    names_sep = "__",
+    values_to = "value"
+  ) |>
+  pivot_wider(names_from = stat, values_from = value)
+
+num_summary_long   # tidy table: one row per variable, one column per statistic
+```
+
+### 3.1.1 The same summary, one row per subject
+
+```{r num_summary_subject}
+# Collapse to one row per subject first, so every participant counts once.
+subject_level <- meta |>
+  distinct(SubjectID, .keep_all = TRUE)
+
+nrow(subject_level)   # 96 sequenced subjects
+
+subject_level |>
+  summarise(across(all_of(num_vars), list(
+    n      = ~sum(!is.na(.)),
+    mean   = ~mean(., na.rm = TRUE),
+    sd     = ~sd(., na.rm = TRUE),
+    median = ~median(., na.rm = TRUE),
+    min    = ~min(., na.rm = TRUE),
+    max    = ~max(., na.rm = TRUE)
+  ), .names = "{.col}__{.fn}")) |>
+  pivot_longer(everything(), names_to = c("variable", "stat"),
+               names_sep = "__", values_to = "value") |>
+  pivot_wider(names_from = stat, values_from = value)
+```
+
+**Question.** Compare the two tables. Which statistic moves the most between the sample-weighted and subject-weighted versions, and why does that make sense given the visit counts you'll see in Section 3.2?
+
+## 3.2 Visits per subject
+
+How many times was each participant sampled? This matters because longitudinal coverage is very uneven: some subjects came back dozens of times, others exactly once. Any analysis that pools all samples together will be dominated by the handful of most-sampled participants.
+
+```{r visits_per_subject}
+# Total unique subjects in the dataset
+num_unique_subjects <- dplyr::n_distinct(meta$SubjectID)
+num_unique_subjects   # print that count (96)
+
+# Count distinct VisitIDs per subject. We use VisitID rather than VisitNumber
+# because VisitID is the raw, complete identifier: as noted in Tutorial 2 some
+# visits are coded with letters and would be lost as NA in VisitNumber.
+visits_per_subject <- meta |>
+  group_by(SubjectID) |>                                            # one group per subject
+  summarise(num_visits = n_distinct(VisitID), .groups = "drop") |>   # count visits
+  arrange(desc(num_visits))                                         # most-sampled first
+
+head(visits_per_subject)      # subjects with the most visits
+summary(visits_per_subject$num_visits)   # median 6 visits, but the range is 1 to 111
+```
+
+Plot the counts to see just how uneven they are:
+
+```{r visits_plot}
+ggplot(visits_per_subject,
+       aes(x = reorder(SubjectID, -num_visits),  # subjects on x, sorted by count
+           y = num_visits)) +                    # number of visits on y
+  geom_col(fill = "orchid") +                    # one bar per subject
+  labs(                                          # axis + plot titles
+    title = "Number of visits per subject",
+    x     = "Subject ID",
+    y     = "Number of visits"
+  ) +
+  theme_minimal() +                              # clean minimal styling
+  theme(
+    axis.text.x  = element_blank(),   # hide x labels (too many to read)
+    axis.ticks.x = element_blank()    # hide the matching x tick marks
+  )
+```
+
+> That steep drop-off is why many analyses of this dataset focus on a single cross-section, such as each subject's first visit (Visit 01), rather than the full longitudinal series.
+
+## 3.3 Insulin-resistant (IR) vs insulin-sensitive (IS) classification
+
+The `ir_is_classification` variable is one of the main grouping variables in this study, so let's see how the samples break down.
+
+```{r ir_is_summary}
+# Counts per category across SAMPLES, including any NAs
+table(meta$ir_is_classification, useNA = "ifany")
+
+# And across SUBJECTS, which is the number that matters for group sizes
+subject_level <- meta |> distinct(SubjectID, .keep_all = TRUE)
+table(subject_level$ir_is_classification, useNA = "ifany")
+```
+
+> **Worth pausing on.** Counted by sample, IS (377) outnumbers IR (286). Counted by subject, that flips: IR (33) outnumbers IS (28). Nothing is wrong with the data. IS participants simply came back for more visits on average. It's a compact reminder that "how many?" has no single answer until you say *how many of what*, and that the unit of analysis is a choice you have to make deliberately. Note the third value as well: `Unknown` covers 192 samples from 35 subjects who were never classified, which is why Tutorial 4 keeps only the rows labelled `IR` or `IS` before comparing the two groups.
+
+```{r ir_is_plot}
+ggplot(meta, aes(x = ir_is_classification)) +   # one column per IR/IS category
+  geom_bar(fill = "steelblue") +                # bar height = number of samples
+  labs(                                         # axis + plot titles
+    title = "Distribution of IR / IS classification across samples",
+    x     = "IR / IS classification",
+    y     = "Number of samples"
+  ) +
+  theme_minimal()                              
+```
+
+```{r}
+# Step 4: Save processed genus-level microbiome data
+
+# Save genus-level relative abundance phyloseq object
+saveRDS(
+  ps_rel,
+  file = "output/iPOP_16S_genus_relative_abundance.rds"
+)
+
+# Save the tidy long-format genus abundance table
+readr::write_csv(
+  mdf,
+  "output/iPOP_16S_genus_relative_abundance_long.csv"
+)
+```
+
+# Step 5: Save first-visit genus-level microbiome data
+
+For downstream cross-sectional analyses, Visit 01 is selected as the first
+microbiome visit. The genus-level relative abundance phyloseq object retains
+the associated sample metadata.
+
+```{r save_first_visit_microbiome}
+
+# Keep Visit 01 samples
+visit01_ids <- sample_names(ps_rel)[
+  sample_data(ps_rel)$VisitID == "01"
+]
+
+ps_visit01 <- prune_samples(
+  visit01_ids,
+  ps_rel
+)
+
+# Remove genera absent from all Visit 01 samples, if any
+ps_visit01 <- prune_taxa(
+  taxa_sums(ps_visit01) > 0,
+  ps_visit01
+)
+
+# Check
+ps_visit01
+
+nsamples(ps_visit01)
+ntaxa(ps_visit01)
+
+summary(
+  sample_sums(ps_visit01)
+)
+```
+
+## Extract Visit 01 metadata
+
+```{r visit01_metadata}
+
+visit01_metadata <- data.frame(
+  sample_data(ps_visit01),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+visit01_metadata$SampleID <-
+  rownames(visit01_metadata)
+
+visit01_metadata <- visit01_metadata %>%
+  select(
+    SampleID,
+    SubjectID,
+    VisitID,
+    VisitNumber,
+    study,
+    race,
+    sex,
+    age,
+    bmi,
+    sspg,
+    ir_is_classification
+  )
+
+# Check
+dim(visit01_metadata)
+
+visit01_metadata %>%
+  count(
+    ir_is_classification
+  )
+```
+
+## Save first-visit microbiome files
+
+```{r save_visit01_files}
+
+saveRDS(
+  ps_visit01,
+  file = "output/iPOP_16S_visit01_genus_relative_abundance.rds"
+)
+
+readr::write_csv(
+  visit01_metadata,
+  "output/iPOP_16S_visit01_metadata.csv"
+)
+```
