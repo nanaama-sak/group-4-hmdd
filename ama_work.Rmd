@@ -1,0 +1,406 @@
+---
+title: "ama_workspace"
+output: html_document
+date: "2026-09-19"
+---
+
+---
+title: "miles_rep_1"
+author: "nanaama-sak"
+date: "2026-09-18"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# MILES Study Replication
+
+## Question: Is the positive association between butyrate-producers in
+
+the gut microbiome and insulin homeostasis (here, insulin sensitivty)
+consistent across datasets? This is replication of the analysis done by
+The Microbiome and Insulin Longitudinal Evaluation Study
+[<https://pmc.ncbi.nlm.nih.gov/articles/PMC9630078/>]
+
+## Dataset: Integrated Personal Omics Profiling (iPOP)! The original
+
+paper ran on the (unavailable) iHMP/HMP2 (integrative Human Microbiome
+Project/Human Microbiome Project 2)
+
+### Set-up
+
+Loading libraries, phyloseq object
+
+```{r librarysetup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# if (!require("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+# BiocManager::install("phyloseq")
+library(phyloseq)
+# BiocManager::install("dplyr")
+library(dplyr)
+# install.packages("tidyr")
+library(tidyr)
+library(ggplot2)
+# install.packages("here")
+library(here)
+library(microshades)
+install.packages("tidyverse")
+library(forcats)
+library(tidyverse)
+```
+
+```{r load-ps}
+ps_file <- here("tutorial2_objects.RData")
+load(ps_file)
+ps #it is loading correctly!
+sample_variables(ps) #these are the metadata columns we can group by
+```
+
+### Data check
+*Is our data similar enough to the MILES dataset (HMP)?*
+1. Do we have a gut microbiome measurement and insulin phenotype on the same participants? 
+
+2. do we have the same genera as MILES HMP? 
+
+3. Do we have enough independent observations (enough participants at a given
+timepoint)
+
+```{r datacheck}
+nsamples(ps) #855 samples
+ntaxa(ps) #96 features/taxa
+taxonomy <- as.data.frame(as(tax_table(ps), "matrix"))
+table(taxonomy$Rank)
+
+#is our data relative or raw?
+range(otu_table(ps)) #we are relative
+```
+
+Yes! We have a gut microbiome measurement. Now *what about insulin?*
+
+```{r datacheck2}
+sample_variables(ps) #ir_is_classification is what its called.
+
+#is it on the same pts?
+table(sample_data(ps)$ir_is_classification)
+
+#ir_is_classification is in sample data, so it will correspond with abundance table. 
+```
+
+Yes! Insulin phenotypes are known per pt. Note that 192 individuals have unknown classification... so will likely filter these out? Later?
+
+*Do we have the same genera studied in MILES?*
+
+```{r datacheck3}
+#MILES looks at alistipes, anaerostipes, copracoccus, flavonifractor, odoribacter, oscillibacter, pseudoflavonifracto
+
+hmp_genera <- taxonomy$Taxon[taxonomy$Rank == "Genus"]
+hmp_genera
+miles_genera <- c("Alistipes", "Anaerostipes", "Coprococcus", "Flavonifractor", "Odoribacter", "Oscillibacter", "Pseudoflavonifractor") #lookuptable?? for miles genera?
+miles_genera
+
+generacheck <- data.frame(Genus = miles_genera, in_hmp = miles_genera %in% hmp_genera)
+
+generacheck #so we have all EXCEPT anaerostipes 
+```
+
+SO! We have 6 of the 7 relevant genera studied. I feel this is fine.
+Onward we push.
+
+*Do we have enough independent observations?*
+
+```{r datacheck3}
+observations <- as.data.frame(as(sample_data(ps), "matrix")) #trying to pull out sample data
+observations
+
+#i want to know how many visits per subject
+observations |>
+  group_by(VisitID) |> #96 subjects
+  tally() #this is showing how many subjects came to a given visit. Visit #1 had the most ppl come. 
+```
+
+VisitID 01 had the most pts involved (n=69). If we are using a single
+time point we should use this visit.
+
+So we will eventually need to filter both by:
+1. presence at visit #1
+2. unknown insulin phenotype.
+
+We will also not be able to make conclusions about genera Aeroyadayada.
+But I would argue our data match enough
+
+### Building the Analysis Subset
+
+#### Narrow to one visit*
+
+```{r visit1only}
+visit01 <- subset_samples(ps, VisitID == "01")
+nsamples(visit01) #correct # of participants (n=69)
+```
+
+#### Narrow to just IS or IR
+```{r visit01-IRIS-status}
+irisvisit01 <- subset_samples(visit01, ir_is_classification %in% c("IR", "IS"))
+
+nsamples(irisvisit01) #44 people have IR/IS status known from visit 1
+
+table(sample_data(irisvisit01)$ir_is_classification) #28 people insulin resistant, #16 people insulin sensitive
+
+```
+
+Our Sample Set now is 44 participants (IR or IS, visit 1). Not a great balance (IR = 28, IS = 16). Keep in mind.
+
+#### filter to genus
+```{r}
+irisv1genera <- subset_taxa(irisvisit01, Rank == "Genus")
+ntaxa(irisv1genera) #45 genera
+
+as.data.frame(tax_table(irisv1genera))
+```
+
+#### sidequest filter to those w/ serum metabolome data
+```{r}
+pilot_ps <- subset_samples(irisv1genera, SubjectID %in% c("ZK112BX", "ZLZQMEV", "ZM7JY3G", "ZPF36E2", "ZTJ7L7Z", "ZUPAQVU", "ZVBQY1N", "ZVM4N7A", "ZW61YGW", "ZWCZHHY", "ZWFDEY0", "ZY7IW45", "K4CK8Y", "ZKFV71L", "ZLZNCLZ", "ZN3TBJM", "ZN9YTFN", "ZPMBHPS"))
+
+# pilot_ps2 <- subset_samples(irisv1genera, SubjectID %in% c("ZN9YTFN-01", "ZN3TBJM-01", "ZM7JY3G-01", "ZLZQMEV-01", "ZLZNCLZ-01", "ZY7IW45-01", "ZWFDEY0-01", "ZWCZHHY-01", "ZW61YGW-01", "ZVM4N7A-01", "ZVBQY1N-01", "ZUPAQVU-01", "ZTJ7L7Z-01", "ZPMBHPS-01", "ZPF36E2-01", "ZKFV71L-01", "ZK4CK8Y-01", "ZK112BX-01"))
+
+nsamples(pilot_ps) 
+
+head(as.data.frame(tax_table(pilot_ps)))
+```
+
+
+```{r}
+# #and now scrapping non-relevant genera
+# iris_v1_miles_genera <- subset_taxa(irisv1genera, Rank %in% c("Alistipes", "Coprococcus", "Flavonifractor", "Odoribacter", "Oscillibacter", "Pseudoflavonifractor"))
+```
+
+```{r cleaning-and-vibe-check}
+sum(taxa_sums(irisv1genera) == 0) #no genus with 0 samples
+irisv1genera <- prune_taxa(taxa_sums(irisv1genera) > 0, irisv1genera)
+ntaxa(irisv1genera)
+irisv1genera
+
+summary(sample_sums(irisv1genera)) # doesn't quite equal 1
+```
+
+### IS/IR Abundance comparison (genus level)
+
+To determine (1) what abundance looks like in each group, and (2) how abundances compare across group
+
+#### Normalize & melt our subsetted ps
+```{r norm-and-melt}
+miles_ps_rel <- transform_sample_counts(irisv1genera, function(x) x / sum(x)) #this normalizes our ps
+all(abs(sample_sums(miles_ps_rel) -1) < 1e-9) #every sample is 1 = true!
+
+#melting into a df
+
+miles_df <- psmelt(miles_ps_rel)
+dim(miles_df) #44 samples x 45 genera = 1980 rows
+miles_df
+```
+
+doing the same with pilot ps
+```{r}
+pilot_ps_rel <- transform_sample_counts(pilot_ps, function(x) x / sum(x)) #this normalizes our ps
+all(abs(sample_sums(pilot_ps_rel) -1) < 1e-9) #every sample is 1 = true!
+
+#melting into a df
+
+pilot_df <- psmelt(pilot_ps_rel)
+dim(pilot_df) #17 samples x 45 genera = 765 rows
+pilot_df
+
+any(pilot_df$sspg == 0) #sspg is steady state glucose reading... this helps us make glucose a continuous variable
+```
+
+#### Genera profile within group
+
+Calculating the mean relative abundace of each genus within IR and IS groups, then visualizing
+```{r }
+genus_means <- miles_df |>
+  group_by(ir_is_classification, Taxon) |>
+  summarise(mean_abund = mean(Abundance, .groups = "drop")) #made a new category called mean_abund)
+genus_means
+ggplot(genus_means, aes(x = ir_is_classification, y = mean_abund, fill = Taxon)) + geom_col() +
+  labs(
+    title = "Mean genus-level composition by Insulin Status",
+    x = "IR/IS Classification",
+    y = "Mean relative abundance"
+  ) + 
+  theme_minimal() +
+  theme(legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size=6))
+```
+
+
+microshades attempt??
+```{r}
+remotes::install_github("mikemc/speedyseq")
+mdf_prep <- prep_mdf(irisvisit01)
+head(as.data.frame(tax_table(irisvisit01)))
+
+```
+
+
+```{r }
+genus_means <- miles_df |>
+  group_by(ir_is_classification, Taxon) |>
+  summarise(mean_abund = mean(Abundance, .groups = "drop")) #made a new category called mean_abund)
+genus_means
+ggplot(genus_means, aes(x = ir_is_classification, y = mean_abund, fill = Taxon)) + geom_col() +
+  labs(
+    title = "Mean genus-level composition by Insulin Status",
+    x = "IR/IS Classification",
+    y = "Mean relative abundance"
+  ) + 
+  theme_minimal() +
+  theme(legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size=6))
+```
+```
+
+First, making ps of just the top 
+
+```{r}
+top_genera <- names(sort(taxa_sums(irisv1genera), decreasing = TRUE)[1:20])
+ps_top_twenty <- prune_taxa(top_genera, irisv1genera)
+top_twenty_df <- psmelt(ps_top_twenty) #melting it
+
+#calculating means
+twenty_means <- top_twenty_df |>
+  group_by(ir_is_classification, Taxon) |>
+  summarise(mean_abund = mean(Abundance, .groups = "drop")) #made a new category called mean_abund)
+
+
+ggplot(twenty_means, aes(x = ir_is_classification, y = mean_abund, fill = Taxon)) + geom_col() +
+  labs(
+    title = "Top 20 Mean genus-level composition by Insulin Status",
+    x = "IR/IS Classification",
+    y = "Mean relative abundance"
+  ) + 
+  theme_minimal() +
+  theme(legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size=6))
+
+
+```
+
+same for pilot
+```{r}
+# genus_means_pilot <- pilot_df |>
+#   group_by(ir_is_classification, Taxon) |>
+#   summarise(mean_abund = mean(Abundance, .groups = "drop")) #made a new category called mean_abund)
+# genus_means_pilot
+# 
+# ggplot(genus_means_pilot, aes(x = ir_is_classification, y = mean_abund, fill = Taxon)) + geom_col() +
+#   labs(
+#     title = "PILOT: Mean genus-level composition in Patients with Metabolomic Data, by Insulin Status",
+#     x = "IR/IS Classification",
+#     y = "Mean relative abundance"
+#   ) + 
+#   theme_minimal() +
+#   theme(legend.key.size = unit(0.3, "cm"),
+#         legend.text = element_text(size=6))
+# 
+# pilot_df
+```
+
+```{r}
+##narrow to just clostridium associated genera?
+
+genus_means %>%
+  filter(Taxon %in% c("Clostridium.IV", "Clostridium.XI", "Clostridium.XIVa", 
+  "Clostridium.XIVb", "Clostridium.XVIII", "Clostridium.sensu_stricto", "unclassified_Clostridiales", "unclassified_Clostridiales_Incertae.Sedis.XIII")) %>%
+  ggplot(aes(x = ir_is_classification, y = mean_abund, fill = Taxon)) + 
+  geom_col(position = "dodge") +  # Side-by-side bars
+  labs(
+    title = "Mean Clostridium Cluster Composition by Insulin Status",
+    x = "IR/IS Classification",
+    y = "Mean relative abundance"
+  ) + 
+  theme_minimal() +
+  theme(legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size=6))
+```
+
+
+```{r}
+genus_means |>
+  group_by(ir_is_classification) |>
+  slice_max(mean_abund, n = 45) |> #showing top 5 genera per group
+  mutate(percent = round(100* mean_abund, 1)) |>
+  select(ir_is_classification, Taxon, percent)
+```
+Bacteroides most abundant (39.7%, followed by Faecalibacterium & Lachnospiracea) --  IN ALL pts
+
+
+now for pilot
+```{r}
+#relative abundance numbers are__ ??
+genus_means_pilot |>
+  group_by(ir_is_classification) |>
+  slice_max(mean_abund, n = 5) |> #showing top 10 genera per group
+  mutate(percent = round(100* mean_abund, 1)) |>
+  select(ir_is_classification, Taxon, percent)
+
+mean_genera_pilot <- genus_means_pilot |>
+  group_by(ir_is_classification) |>
+  slice_max(mean_abund, n = 45) |> #
+  mutate(percent = round(100* mean_abund, 1)) |>
+  select(ir_is_classification, Taxon, percent)
+
+mean_genera_pilot
+```
+```{r}
+pilot_obs <- as.data.frame(as(sample_data(pilot_ps), "matrix"))
+pilot_obs
+```
+#### Abundance indices (PILOT)
+```{r}
+pilot_matrix <- as(otu_table(pilot_ps), "matrix")
+
+if(taxa_are_rows(pilot_ps)) pilot_matrix <- t(pilot_matrix)
+
+pilot_alpha <- data.frame(
+  SampleID = rownames(pilot_matrix),
+  Observed = rowSums(pilot_matrix > 0),                        # richness: genera present
+  Shannon  = vegan::diversity(pilot_matrix, index = "shannon"),
+  Simpson  = vegan::diversity(pilot_matrix, index = "simpson"),
+  Group    = factor(sample_data(pilot_ps)$ir_is_classification[
+                      match(rownames(pilot_matrix), sample_names(pilot_ps))],
+                    levels = c("IR", "IS"))
+)
+
+head(pilot_alpha)
+```
+We calculated alpha diversity metrics! note to self to amend this to pilot_df.
+
+```{r}
+# Subset Clostridium only
+clos_ps <- subset_taxa(pilot_ps, Taxon %in% c(
+  "Clostridium.IV", "Clostridium.XI", "Clostridium.XIVa", 
+  "Clostridium.XIVb", "Clostridium.XVIII", "Clostridium.sensu_stricto", "unclassified_Clostridiales", "unclassified_Clostridiales_Incertae.Sedis.XIII" 
+))
+
+# Relative abundance within Clostridium
+clos_rel <- transform_sample_counts(clos_ps, function(x) x/sum(x))
+```
+
+
+```{r}
+# Stacked bar
+plot_bar(clos_rel, x = "ir_is_classification", fill = "Taxon")
+```
+
+
+```{r}
+# Box plot of each cluster by group
+clos_melt <- psmelt(clos_rel)
+ggplot(clos_melt, aes(x = ir_is_classification, y = Abundance, fill = Taxon)) +
+  geom_boxplot() +
+  facet_wrap(~Taxon)
+```
+
+
