@@ -9,3 +9,18 @@ Diet-derived choline leads to microbial production of TMA, which is converted to
 With the iPOP dataset, we will identify:
 Differential presence of TMA, TMAO and choline in the serum of individuals
 Differential abundance of choline-producing microbiota in individuals with diabetes
+
+## Our presentation:
+Can be accessed at this [link](https://docs.google.com/presentation/d/1RrlZCT7MrS3ywtI7J3-u3svSu2ZKJHHa/edit?usp=drive_link&ouid=109058833464247112753&rtpof=true&sd=true), as well as in the outputs folder as a .ppxt (soon).
+
+## Our Team:
+Group members:
+* Dr. Shuo Han, PhD
+* Dr. Devendra Patel, PhD
+* Ama Kwabia, BS
+
+Facilitators & Faculty:
+* Dr. Lisa Karstens
+* Dr. Steven Bedrick
+* Juliette Kudrick, BS
+(and countless more -- thank you!)
